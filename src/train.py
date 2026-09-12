@@ -27,7 +27,7 @@ MODEL_REGISTRY = {
 }
 
 
-def make_loaders(X_train, y_train, X_val, y_val, batch_size):
+def make_loaders(X_train, y_train, X_val, y_val, batch_size, generator=None):
     """Wraps train/val arrays into DataLoaders.
 
     Parameters
@@ -36,6 +36,11 @@ def make_loaders(X_train, y_train, X_val, y_val, batch_size):
         Split arrays for a single subject.
     batch_size : int
         Batch size for both loaders.
+    generator : torch.Generator, optional
+        Governs the training loader's shuffle order. Passed explicitly
+        (rather than relying on global torch RNG state) so shuffle order
+        is reproducible independent of what else has consumed random
+        numbers beforehand.
 
     Returns
     -------
@@ -45,7 +50,7 @@ def make_loaders(X_train, y_train, X_val, y_val, batch_size):
     train_ds = TensorDataset(torch.tensor(X_train, dtype=torch.float32), torch.tensor(y_train, dtype=torch.long))
     val_ds   = TensorDataset(torch.tensor(X_val, dtype=torch.float32), torch.tensor(y_val, dtype=torch.long))
 
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, generator=generator)
     val_loader   = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
     return train_loader, val_loader
 
@@ -101,53 +106,65 @@ def evaluate_arrays(model, X, y, device, batch_size):
     return evaluate_loader(model, loader, device)
 
 
-def train_one_subject(subject_id, model_name, cfg: Config):
-    """Trains a single model for a single subject, with early stopping.
+def fit(X_train_full, y_train_full, model_name, cfg: Config, subject_id=None):
+    """Trains a single model on already-loaded data, with early stopping.
 
-    The training session (session_T) is further split into train/validation
-    for early stopping only. The test session (session_E) is held out
-    entirely until final evaluation, never used for model selection.
+    Splits the given training data into train/validation for early
+    stopping only; takes no test data, so callers (including a
+    hyperparameter sweep) cannot leak test-set information into model
+    selection even indirectly.
 
     Parameters
     ----------
-    subject_id : int
-        Subject identifier (1-9).
+    X_train_full, y_train_full : ndarray
+        A subject's full session_T trials and labels, as returned by
+        `get_subject_data`.
     model_name : str
         Either "eegnet" or "conformer".
     cfg : Config
         Full project configuration.
+    subject_id : int, optional
+        Used only to label progress messages.
 
     Returns
     -------
-    dict
-        Subject id, best validation accuracy, test accuracy, test kappa,
-        and the checkpoint path.
+    model : nn.Module
+        Trained model, loaded with its best-validation-accuracy weights.
+    best_val_acc : float
+        Best validation accuracy reached during training.
     """
     device = torch.device(cfg.train.device if torch.cuda.is_available() else "cpu")
+    label  = f"subject {subject_id}" if subject_id is not None else "subject"
 
-    print(f"[{model_name}] subject {subject_id}: loading and epoching EEG data...")
-    X_train_full, y_train_full, X_test, y_test = get_subject_data(subject_id, cfg.data)
+    # Per-subject seed: reproducible across repeated calls (e.g. a sweep
+    # trying several configs on the same subject), but distinct across
+    # subjects rather than giving every subject identical initialization.
+    seed = cfg.train.seed if subject_id is None else cfg.train.seed + subject_id
+    torch.manual_seed(seed)
+    loader_generator = torch.Generator().manual_seed(seed)
 
     X_train, X_val, y_train, y_val = train_test_split(
         X_train_full, y_train_full,
         test_size=0.2, stratify=y_train_full, random_state=cfg.train.seed,
     )
-    train_loader, val_loader = make_loaders(X_train, y_train, X_val, y_val, cfg.train.batch_size)
+    train_loader, val_loader = make_loaders(
+        X_train, y_train, X_val, y_val, cfg.train.batch_size, generator=loader_generator
+    )
 
     n_times   = X_train.shape[-1]
     model_cls = MODEL_REGISTRY[model_name]
     model_cfg = getattr(cfg, model_name)
     model     = model_cls(N_CHANNELS, n_times, N_CLASSES, model_cfg).to(device)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=cfg.train.lr, weight_decay=cfg.train.weight_decay)
+    optimizer = torch.optim.Adam(model.parameters(), lr=model_cfg.lr, weight_decay=cfg.train.weight_decay)
     criterion = nn.CrossEntropyLoss()
 
     print(
-        f"[{model_name}] subject {subject_id}: training on {len(X_train)} trials, "
+        f"[{model_name}] {label}: training on {len(X_train)} trials, "
         f"validating on {len(X_val)} (session_T split), device={device}"
     )
 
-    best_val_acc       = 0.0
+    best_val_acc       = -1.0
     best_state         = None
     epochs_no_improve  = 0
 
@@ -171,20 +188,47 @@ def train_one_subject(subject_id, model_name, cfg: Config):
 
         if epoch % 10 == 0 or epochs_no_improve >= cfg.train.patience:
             print(
-                f"[{model_name}] subject {subject_id}: epoch {epoch:>3} - "
+                f"[{model_name}] {label}: epoch {epoch:>3} - "
                 f"val_acc={val_acc:.3f} (best={best_val_acc:.3f}, "
                 f"no_improve={epochs_no_improve}/{cfg.train.patience})"
             )
 
         if epochs_no_improve >= cfg.train.patience:
-            print(f"[{model_name}] subject {subject_id}: early stopping at epoch {epoch}")
+            print(f"[{model_name}] {label}: early stopping at epoch {epoch}")
             break
 
     model.load_state_dict(best_state)
+    return model, best_val_acc
+
+
+def train_one_subject(subject_id, model_name, cfg: Config):
+    """Loads a subject's data, fits a model, saves it, and evaluates on test.
+
+    Parameters
+    ----------
+    subject_id : int
+        Subject identifier (1-9).
+    model_name : str
+        Either "eegnet" or "conformer".
+    cfg : Config
+        Full project configuration.
+
+    Returns
+    -------
+    dict
+        Subject id, best validation accuracy, test accuracy, test kappa,
+        and the checkpoint path.
+    """
+    device = torch.device(cfg.train.device if torch.cuda.is_available() else "cpu")
+
+    print(f"[{model_name}] subject {subject_id}: loading and epoching EEG data...")
+    X_train_full, y_train_full, X_test, y_test = get_subject_data(subject_id, cfg.data)
+
+    model, best_val_acc = fit(X_train_full, y_train_full, model_name, cfg, subject_id=subject_id)
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     ckpt_path = OUTPUT_DIR / f"{model_name}_subject{subject_id}.pt"
-    torch.save(best_state, ckpt_path)
+    torch.save(model.state_dict(), ckpt_path)
 
     test_acc, test_kappa = evaluate_arrays(model, X_test, y_test, device, cfg.train.batch_size)
     print(

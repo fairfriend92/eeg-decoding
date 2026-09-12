@@ -45,7 +45,7 @@ class DataConfig:
 
 @dataclass
 class ConformerConfig:
-    """Architecture parameters for the transformer encoder model.
+    """Architecture and optimization parameters for the transformer encoder.
 
     Parameters
     ----------
@@ -61,6 +61,10 @@ class ConformerConfig:
         Hidden dimension of the feed-forward sublayer.
     dropout : float
         Dropout probability applied throughout the encoder and head.
+    lr : float
+        Initial learning rate for Adam. Lower than EEGNet's -- selected via
+        hyperparameter sweep; the larger, less-biased architecture
+        overfits at higher learning rates on this dataset's size.
     """
 
     patch_size: int = 25
@@ -68,12 +72,13 @@ class ConformerConfig:
     n_heads: int = 8
     n_layers: int = 4
     ff_dim: int = 256
-    dropout: float = 0.3
+    dropout: float = 0.5
+    lr: float = 3e-4
 
 
 @dataclass
 class EEGNetConfig:
-    """Architecture parameters for the EEGNet CNN baseline.
+    """Architecture and optimization parameters for the EEGNet CNN baseline.
 
     Parameters
     ----------
@@ -87,7 +92,12 @@ class EEGNetConfig:
         Length of the temporal convolution kernel, in samples. Set to roughly
         half the sampling rate, so the kernel spans ~0.5s of signal.
     dropout : float
-        Dropout probability applied after each pooling stage.
+        Dropout probability applied after each pooling stage. Sweep found
+        dropout in {0.25, 0.5} statistically indistinguishable at this
+        learning rate; kept at the original paper's value.
+    lr : float
+        Initial learning rate for Adam. Confirmed near-optimal by
+        hyperparameter sweep -- a lower rate (3e-4) underperformed clearly.
     """
 
     f1: int = 8
@@ -95,18 +105,21 @@ class EEGNetConfig:
     f2: int = 16
     kernel_length: int = 125    # ~0.5s at 250 Hz
     dropout: float = 0.25
+    lr: float = 1e-3
 
 
 @dataclass
 class TrainConfig:
     """Parameters controlling the per-subject training loop.
 
+    Learning rate is not here -- it is model-specific (see EEGNetConfig,
+    ConformerConfig), since the two architectures were found to need
+    different values.
+
     Parameters
     ----------
     batch_size : int
         Training and evaluation batch size.
-    lr : float
-        Initial learning rate for Adam.
     weight_decay : float
         L2 regularization coefficient.
     n_epochs : int
@@ -120,7 +133,6 @@ class TrainConfig:
     """
 
     batch_size: int = 32
-    lr: float = 1e-3
     weight_decay: float = 1e-4
     n_epochs: int = 100
     patience: int = 15
