@@ -5,11 +5,31 @@ Each subject's data is split using the dataset's official session labels
 so results remain directly comparable to published baselines.
 """
 
+import os
+import warnings
+
+import moabb
 import numpy as np
+
+warnings.filterwarnings(
+    "ignore",
+    message="Montage name 'standard_1005' is deprecated.*",
+    category=FutureWarning,
+)
+
+# Forces the classic direct-download source rather than MOABB's newer NEMAR
+# backend, which has an unresolved stall on the manifest-transfer step.
+moabb.set_download_provider("upstream")
+
 from moabb.datasets import BNCI2014_001
 from moabb.paradigms import MotorImagery
 
-from config import DataConfig
+from config import DATA_DIR, DataConfig
+
+# Redirects MOABB's download location from its default (~/mne_data) into
+# this project's data/ directory, matching the raw-input-only convention.
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+os.environ.setdefault("MNE_DATA", str(DATA_DIR))
 
 
 def load_subject(subject_id, cfg: DataConfig):
@@ -40,6 +60,8 @@ def load_subject(subject_id, cfg: DataConfig):
         tmax=cfg.tmax,
         resample=cfg.resample_freq,
     )
+    # get_data() prints MOABB's own internal progress messages (dataset
+    # download, event/channel selection); not something this project controls.
     X, y_labels, metadata = paradigm.get_data(dataset=dataset, subjects=[subject_id])
 
     classes    = sorted(np.unique(y_labels))    # fixed label order across subjects
@@ -78,8 +100,35 @@ def split_subject(X, y, sessions, cfg: DataConfig):
     return X_train, y_train, X_test, y_test
 
 
+def normalize_subject(X_train, X_test, eps=1e-8):
+    """Z-scores each channel using statistics from the training trials only.
+
+    Parameters
+    ----------
+    X_train : ndarray, shape (n_train, n_channels, n_times)
+        Training trials. Per-channel mean and std are computed from these
+        only, so no test-set information leaks into the normalization.
+    X_test : ndarray, shape (n_test, n_channels, n_times)
+        Test trials, normalized with the training statistics.
+    eps : float
+        Added to the standard deviation to avoid division by zero for a
+        flat channel.
+
+    Returns
+    -------
+    X_train, X_test : ndarray
+        Normalized trials, same shapes as the inputs.
+    """
+    mean = X_train.mean(axis=(0, 2), keepdims=True)
+    std  = X_train.std(axis=(0, 2), keepdims=True)
+
+    X_train = (X_train - mean) / (std + eps)
+    X_test  = (X_test - mean) / (std + eps)
+    return X_train, X_test
+
+
 def get_subject_data(subject_id, cfg: DataConfig):
-    """Loads and splits a single subject's data in one call.
+    """Loads, splits, and normalizes a single subject's data in one call.
 
     Parameters
     ----------
@@ -91,7 +140,9 @@ def get_subject_data(subject_id, cfg: DataConfig):
     Returns
     -------
     X_train, y_train, X_test, y_test : ndarray
-        Session-split trials for the subject.
+        Session-split, per-channel-normalized trials for the subject.
     """
     X, y, sessions = load_subject(subject_id, cfg)
-    return split_subject(X, y, sessions, cfg)
+    X_train, y_train, X_test, y_test = split_subject(X, y, sessions, cfg)
+    X_train, X_test = normalize_subject(X_train, X_test)
+    return X_train, y_train, X_test, y_test

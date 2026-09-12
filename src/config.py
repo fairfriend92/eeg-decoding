@@ -39,8 +39,8 @@ class DataConfig:
     tmin: float = 0.0
     tmax: float = 4.0
     resample_freq: float = 250.0
-    train_session: str = "session_T"
-    test_session: str = "session_E"
+    train_session: str = "0train"
+    test_session: str = "1test"
 
 
 @dataclass
@@ -83,6 +83,9 @@ class EEGNetConfig:
         Depth multiplier for the depthwise spatial convolution.
     f2 : int
         Number of pointwise filters in the separable convolution.
+    kernel_length : int
+        Length of the temporal convolution kernel, in samples. Set to roughly
+        half the sampling rate, so the kernel spans ~0.5s of signal.
     dropout : float
         Dropout probability applied after each pooling stage.
     """
@@ -90,6 +93,7 @@ class EEGNetConfig:
     f1: int = 8
     depth_multiplier: int = 2
     f2: int = 16
+    kernel_length: int = 125    # ~0.5s at 250 Hz
     dropout: float = 0.25
 
 

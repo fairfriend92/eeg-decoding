@@ -1,0 +1,6 @@
+torch>=2.1
+moabb>=1.0
+mne>=1.6
+numpy>=1.26
+scikit-learn>=1.4
+matplotlib>=3.8
