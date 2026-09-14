@@ -1,5 +1,10 @@
 """Per-subject training loop for EEGNet and EEG Conformer models.
 
+n_folds=1 (default): single 80/20 split per subject, one model.
+n_folds>=2: stratified k-fold cross-validation per subject, one model per
+fold, plus a softmax-averaged ensemble score -- more expensive, gives
+fold-level test accuracy/kappa (mean +/- std) instead of a single draw.
+
 Must be run with this file's own directory (src/) as the script's
 directory, e.g. `python train.py` from within src/, or `python src/train.py`
 from the repository root. Do not invoke via `python -m src.train`, which
@@ -9,11 +14,12 @@ imports used throughout src/.
 
 import argparse
 import json
+import statistics
 
 import torch
 import torch.nn as nn
 from sklearn.metrics import accuracy_score, cohen_kappa_score
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import StratifiedKFold, train_test_split
 from torch.utils.data import DataLoader, TensorDataset
 
 from config import N_CHANNELS, N_CLASSES, OUTPUT_DIR, SUBJECT_IDS, Config
@@ -104,6 +110,62 @@ def evaluate_arrays(model, X, y, device, batch_size):
     ds     = TensorDataset(torch.tensor(X, dtype=torch.float32), torch.tensor(y, dtype=torch.long))
     loader = DataLoader(ds, batch_size=batch_size, shuffle=False)
     return evaluate_loader(model, loader, device)
+
+
+def predict_probs(model, X, device, batch_size):
+    """Computes softmax class probabilities for X via batched inference.
+
+    Parameters
+    ----------
+    model : nn.Module
+        Trained model; switched to eval mode internally.
+    X : ndarray
+        Data to predict on.
+    device : torch.device
+        Device to run inference on.
+    batch_size : int
+        Batch size for inference.
+
+    Returns
+    -------
+    ndarray, shape (len(X), n_classes)
+        Class probabilities.
+    """
+    ds     = TensorDataset(torch.tensor(X, dtype=torch.float32))
+    loader = DataLoader(ds, batch_size=batch_size, shuffle=False)
+
+    model.eval()
+    all_probs = []
+    with torch.no_grad():
+        for (xb,) in loader:
+            xb = xb.to(device)
+            all_probs.append(torch.softmax(model(xb), dim=1).cpu())
+    return torch.cat(all_probs, dim=0).numpy()
+
+
+def evaluate_ensemble(models, X, y, device, batch_size):
+    """Scores the average of several models' softmax predictions.
+
+    Parameters
+    ----------
+    models : list of nn.Module
+        Trained models (e.g. one per cross-validation fold) to ensemble.
+    X, y : ndarray
+        Evaluation data and labels.
+    device : torch.device
+        Device to run inference on.
+    batch_size : int
+        Batch size for inference.
+
+    Returns
+    -------
+    float, float
+        Accuracy and Cohen's kappa of the ensembled predictions.
+    """
+    avg_probs = sum(predict_probs(model, X, device, batch_size) for model in models) / len(models)
+    preds     = avg_probs.argmax(axis=1)
+    return accuracy_score(y, preds), cohen_kappa_score(y, preds)
+
 
 
 def fit_on_split(X_train, y_train, X_val, y_val, model_name, cfg: Config, subject_id=None, seed=None):
@@ -232,8 +294,17 @@ def fit(X_train_full, y_train_full, model_name, cfg: Config, subject_id=None):
     return fit_on_split(X_train, y_train, X_val, y_val, model_name, cfg, subject_id=subject_id)
 
 
-def train_one_subject(subject_id, model_name, cfg: Config):
-    """Loads a subject's data, fits a model, saves it, and evaluates on test.
+def train_one_subject(subject_id, model_name, cfg: Config, n_folds=1):
+    """Loads a subject's data, fits model(s), saves them, evaluates on test.
+
+    n_folds=1 (default): single 80/20 split, one model, one checkpoint --
+    unchanged from the original behavior.
+
+    n_folds>=2: stratified k-fold cross-validation over session_T, one
+    model per fold, each saved separately. Reports fold-level test
+    accuracy/kappa as mean +/- std (matching the project's fold-level
+    reporting standard) plus a softmax-averaged ensemble score across the
+    fold models.
 
     Parameters
     ----------
@@ -243,42 +314,105 @@ def train_one_subject(subject_id, model_name, cfg: Config):
         Either "eegnet" or "conformer".
     cfg : Config
         Full project configuration.
+    n_folds : int
+        1 for a single split; >=2 for that many cross-validation folds.
 
     Returns
     -------
     dict
-        Subject id, best validation accuracy, test accuracy, test kappa,
-        and the checkpoint path.
+        n_folds=1: subject id, val accuracy, test accuracy, test kappa,
+        checkpoint path.
+        n_folds>=2: subject id, mean/std test accuracy and kappa across
+        folds, ensemble test accuracy and kappa, and per-fold detail.
     """
     device = torch.device(cfg.train.device if torch.cuda.is_available() else "cpu")
 
     print(f"[{model_name}] subject {subject_id}: loading and epoching EEG data...")
     X_train_full, y_train_full, X_test, y_test = get_subject_data(subject_id, cfg.data)
 
-    model, best_val_acc = fit(X_train_full, y_train_full, model_name, cfg, subject_id=subject_id)
-
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    ckpt_path = OUTPUT_DIR / f"{model_name}_subject{subject_id}.pt"
-    torch.save(model.state_dict(), ckpt_path)
 
-    test_acc, test_kappa = evaluate_arrays(model, X_test, y_test, device, cfg.train.batch_size)
+    if n_folds == 1:
+        model, best_val_acc = fit(X_train_full, y_train_full, model_name, cfg, subject_id=subject_id)
+
+        ckpt_path = OUTPUT_DIR / f"{model_name}_subject{subject_id}.pt"
+        torch.save(model.state_dict(), ckpt_path)
+
+        test_acc, test_kappa = evaluate_arrays(model, X_test, y_test, device, cfg.train.batch_size)
+        print(
+            f"[{model_name}] subject {subject_id}: done - "
+            f"val_acc={best_val_acc:.3f}, test_acc={test_acc:.3f}, test_kappa={test_kappa:.3f}"
+        )
+
+        return {
+            "subject":       subject_id,
+            "model":         model_name,
+            "n_folds":       1,
+            "val_accuracy":  best_val_acc,
+            "test_accuracy": test_acc,
+            "test_kappa":    test_kappa,
+            "checkpoint":    str(ckpt_path),
+        }
+
+    base_seed = cfg.train.seed + subject_id
+    splitter  = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=base_seed)
+
+    fold_results = []
+    fold_models  = []
+    for fold_idx, (train_idx, val_idx) in enumerate(splitter.split(X_train_full, y_train_full)):
+        model, val_acc = fit_on_split(
+            X_train_full[train_idx], y_train_full[train_idx],
+            X_train_full[val_idx], y_train_full[val_idx],
+            model_name, cfg, subject_id=subject_id, seed=base_seed + fold_idx,
+        )
+
+        ckpt_path = OUTPUT_DIR / f"{model_name}_subject{subject_id}_fold{fold_idx}.pt"
+        torch.save(model.state_dict(), ckpt_path)
+
+        test_acc, test_kappa = evaluate_arrays(model, X_test, y_test, device, cfg.train.batch_size)
+        print(
+            f"[{model_name}] subject {subject_id} fold {fold_idx}: "
+            f"val_acc={val_acc:.3f}, test_acc={test_acc:.3f}, test_kappa={test_kappa:.3f}"
+        )
+
+        fold_results.append({
+            "fold":          fold_idx,
+            "val_accuracy":  val_acc,
+            "test_accuracy": test_acc,
+            "test_kappa":    test_kappa,
+            "checkpoint":    str(ckpt_path),
+        })
+        fold_models.append(model)
+
+    test_accs   = [r["test_accuracy"] for r in fold_results]
+    test_kappas = [r["test_kappa"] for r in fold_results]
+    ensemble_test_acc, ensemble_test_kappa = evaluate_ensemble(
+        fold_models, X_test, y_test, device, cfg.train.batch_size
+    )
+
     print(
         f"[{model_name}] subject {subject_id}: done - "
-        f"val_acc={best_val_acc:.3f}, test_acc={test_acc:.3f}, test_kappa={test_kappa:.3f}"
+        f"test_acc={statistics.mean(test_accs):.3f}+/-{statistics.stdev(test_accs):.3f}, "
+        f"test_kappa={statistics.mean(test_kappas):.3f}+/-{statistics.stdev(test_kappas):.3f}, "
+        f"ensemble_test_acc={ensemble_test_acc:.3f}, ensemble_test_kappa={ensemble_test_kappa:.3f}"
     )
 
     return {
-        "subject":       subject_id,
-        "model":         model_name,
-        "val_accuracy":  best_val_acc,
-        "test_accuracy": test_acc,
-        "test_kappa":    test_kappa,
-        "checkpoint":    str(ckpt_path),
+        "subject":                subject_id,
+        "model":                  model_name,
+        "n_folds":                n_folds,
+        "test_accuracy":          statistics.mean(test_accs),
+        "test_accuracy_std":      statistics.stdev(test_accs),
+        "test_kappa":             statistics.mean(test_kappas),
+        "test_kappa_std":         statistics.stdev(test_kappas),
+        "ensemble_test_accuracy": ensemble_test_acc,
+        "ensemble_test_kappa":    ensemble_test_kappa,
+        "fold_results":           fold_results,
     }
 
 
-def run_all_subjects(model_name, cfg: Config = None):
-    """Trains one model per subject and writes aggregate results to disk.
+def run_all_subjects(model_name, cfg: Config = None, n_folds=1):
+    """Trains one model (or one per fold) per subject; writes results to disk.
 
     Parameters
     ----------
@@ -286,6 +420,9 @@ def run_all_subjects(model_name, cfg: Config = None):
         Either "eegnet" or "conformer".
     cfg : Config, optional
         Full project configuration; defaults to `Config()`.
+    n_folds : int
+        1 for a single 80/20 split per subject (default, matches prior
+        behavior); >=2 for that many cross-validation folds per subject.
 
     Returns
     -------
@@ -293,8 +430,11 @@ def run_all_subjects(model_name, cfg: Config = None):
         Per-subject results, in subject order.
     """
     cfg = cfg or Config()
-    print(f"Training {model_name} for {len(SUBJECT_IDS)} subjects (within-subject, official session_T/session_E split)")
-    results = [train_one_subject(sid, model_name, cfg) for sid in SUBJECT_IDS]
+    print(
+        f"Training {model_name} for {len(SUBJECT_IDS)} subjects "
+        f"(n_folds={n_folds}, within-subject, official session_T/session_E split)"
+    )
+    results = [train_one_subject(sid, model_name, cfg, n_folds=n_folds) for sid in SUBJECT_IDS]
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     results_path = OUTPUT_DIR / f"{model_name}_results.json"
@@ -307,6 +447,11 @@ def run_all_subjects(model_name, cfg: Config = None):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("model", choices=list(MODEL_REGISTRY.keys()))
+    parser.add_argument(
+        "--n-folds", type=int, default=1,
+        help="1 for a single 80/20 split per subject (default); >=2 for that many "
+             "stratified CV folds per subject, with an added softmax-averaged ensemble score.",
+    )
     args = parser.parse_args()
 
-    run_all_subjects(args.model)
+    run_all_subjects(args.model, n_folds=args.n_folds)
