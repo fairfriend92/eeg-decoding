@@ -106,25 +106,28 @@ def evaluate_arrays(model, X, y, device, batch_size):
     return evaluate_loader(model, loader, device)
 
 
-def fit(X_train_full, y_train_full, model_name, cfg: Config, subject_id=None):
-    """Trains a single model on already-loaded data, with early stopping.
+def fit_on_split(X_train, y_train, X_val, y_val, model_name, cfg: Config, subject_id=None, seed=None):
+    """Trains a single model on an explicit train/val split, with early
+    stopping.
 
-    Splits the given training data into train/validation for early
-    stopping only; takes no test data, so callers (including a
-    hyperparameter sweep) cannot leak test-set information into model
-    selection even indirectly.
+    Core training loop, reused by both `fit` (single 80/20 split) and any
+    cross-validation caller that supplies its own fold split.
 
     Parameters
     ----------
-    X_train_full, y_train_full : ndarray
-        A subject's full session_T trials and labels, as returned by
-        `get_subject_data`.
+    X_train, y_train, X_val, y_val : ndarray
+        Already-split training and validation data.
     model_name : str
         Either "eegnet" or "conformer".
     cfg : Config
         Full project configuration.
     subject_id : int, optional
         Used only to label progress messages.
+    seed : int, optional
+        Seeds model init and the training loader's shuffle order. Defaults
+        to `cfg.train.seed` (or `cfg.train.seed + subject_id` if given),
+        matching `fit`'s behavior; a cross-validation caller should pass a
+        distinct seed per fold.
 
     Returns
     -------
@@ -136,17 +139,11 @@ def fit(X_train_full, y_train_full, model_name, cfg: Config, subject_id=None):
     device = torch.device(cfg.train.device if torch.cuda.is_available() else "cpu")
     label  = f"subject {subject_id}" if subject_id is not None else "subject"
 
-    # Per-subject seed: reproducible across repeated calls (e.g. a sweep
-    # trying several configs on the same subject), but distinct across
-    # subjects rather than giving every subject identical initialization.
-    seed = cfg.train.seed if subject_id is None else cfg.train.seed + subject_id
+    if seed is None:
+        seed = cfg.train.seed if subject_id is None else cfg.train.seed + subject_id
     torch.manual_seed(seed)
     loader_generator = torch.Generator().manual_seed(seed)
 
-    X_train, X_val, y_train, y_val = train_test_split(
-        X_train_full, y_train_full,
-        test_size=0.2, stratify=y_train_full, random_state=cfg.train.seed,
-    )
     train_loader, val_loader = make_loaders(
         X_train, y_train, X_val, y_val, cfg.train.batch_size, generator=loader_generator
     )
@@ -161,7 +158,7 @@ def fit(X_train_full, y_train_full, model_name, cfg: Config, subject_id=None):
 
     print(
         f"[{model_name}] {label}: training on {len(X_train)} trials, "
-        f"validating on {len(X_val)} (session_T split), device={device}"
+        f"validating on {len(X_val)}, device={device}"
     )
 
     best_val_acc       = -1.0
@@ -199,6 +196,40 @@ def fit(X_train_full, y_train_full, model_name, cfg: Config, subject_id=None):
 
     model.load_state_dict(best_state)
     return model, best_val_acc
+
+
+def fit(X_train_full, y_train_full, model_name, cfg: Config, subject_id=None):
+    """Trains a single model on already-loaded data, with early stopping.
+
+    Splits the given training data into a single 80/20 train/validation
+    split for early stopping only; takes no test data, so callers
+    (including a hyperparameter sweep) cannot leak test-set information
+    into model selection even indirectly.
+
+    Parameters
+    ----------
+    X_train_full, y_train_full : ndarray
+        A subject's full session_T trials and labels, as returned by
+        `get_subject_data`.
+    model_name : str
+        Either "eegnet" or "conformer".
+    cfg : Config
+        Full project configuration.
+    subject_id : int, optional
+        Used only to label progress messages.
+
+    Returns
+    -------
+    model : nn.Module
+        Trained model, loaded with its best-validation-accuracy weights.
+    best_val_acc : float
+        Best validation accuracy reached during training.
+    """
+    X_train, X_val, y_train, y_val = train_test_split(
+        X_train_full, y_train_full,
+        test_size=0.2, stratify=y_train_full, random_state=cfg.train.seed,
+    )
+    return fit_on_split(X_train, y_train, X_val, y_val, model_name, cfg, subject_id=subject_id)
 
 
 def train_one_subject(subject_id, model_name, cfg: Config):

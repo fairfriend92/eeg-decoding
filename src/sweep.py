@@ -1,9 +1,15 @@
 """Hyperparameter sweep for EEGNet and EEG Conformer.
 
 Selects by mean validation accuracy across subjects; never touches the
-test session (session_E) -- see train.fit for why. Each subject's data is
-loaded once and reused across every hyperparameter combination, since
-loading does not depend on the hyperparameters being swept.
+test session (session_E). Each subject's data is loaded once and reused
+across every hyperparameter combination, since loading does not depend on
+the hyperparameters being swept.
+
+Validation strategy is chosen via n_folds:
+    n_folds=1  -- single 80/20 split per subject, cheapest, noisiest
+               per-config estimate.
+    n_folds>=2 -- stratified k-fold cross-validation per subject, more
+               expensive, less noisy per-config estimate. Default is 5.
 
 Must be run with this file's own directory (src/) as the script's
 directory -- see train.py for why.
@@ -13,17 +19,20 @@ Default search grids, applied on top of Config() defaults:
     eegnet:    lr in {1e-3, 3e-4}, dropout in {0.25, 0.5}
     conformer: lr in {1e-3, 3e-4}, dropout in {0.3, 0.5}
 
-Each grid is 4 configs x 9 subjects = 36 short, early-stopped training
-runs. Edit DEFAULT_GRIDS below to widen or narrow the search.
+Each grid is 4 configs x 9 subjects x n_folds short, early-stopped
+training runs (e.g. 180 runs at the n_folds=5 default). Edit
+DEFAULT_GRIDS below to widen or narrow the grid.
 """
 
 import argparse
 import itertools
 import json
 
+from sklearn.model_selection import StratifiedKFold
+
 from config import OUTPUT_DIR, SUBJECT_IDS, Config
 from data_loader import get_subject_data
-from train import fit
+from train import fit, fit_on_split
 
 DEFAULT_GRIDS = {
     "eegnet": {
@@ -88,7 +97,53 @@ def build_config(model_name, overrides):
     return cfg
 
 
-def run_sweep(model_name, grid=None, subjects=None):
+def evaluate_subject(X, y, model_name, cfg: Config, n_folds, subject_id=None):
+    """Evaluates one subject under one config: a single split (n_folds=1)
+    or stratified k-fold cross-validation (n_folds>=2).
+
+    Never touches test data -- X, y should be a subject's session_T only.
+
+    Parameters
+    ----------
+    X, y : ndarray
+        A subject's full training-session trials and labels.
+    model_name : str
+        Either "eegnet" or "conformer".
+    cfg : Config
+        Full project configuration.
+    n_folds : int
+        1 for a single 80/20 split; >=2 for that many stratified folds.
+    subject_id : int, optional
+        Used to label progress messages and to derive a base seed, so
+        results are reproducible but distinct across subjects.
+
+    Returns
+    -------
+    list of float
+        Validation accuracy for each split (length 1 if n_folds=1, else
+        length n_folds).
+    """
+    if n_folds == 1:
+        _, val_acc = fit(X, y, model_name, cfg, subject_id=subject_id)
+        return [val_acc]
+
+    base_seed = cfg.train.seed if subject_id is None else cfg.train.seed + subject_id
+    splitter  = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=base_seed)
+
+    fold_accs = []
+    for fold_idx, (train_idx, val_idx) in enumerate(splitter.split(X, y)):
+        # Distinct seed per fold, so folds don't all train from identical
+        # initialization; still reproducible given (subject, fold).
+        _, val_acc = fit_on_split(
+            X[train_idx], y[train_idx], X[val_idx], y[val_idx], model_name, cfg,
+            subject_id=subject_id, seed=base_seed + fold_idx,
+        )
+        fold_accs.append(val_acc)
+
+    return fold_accs
+
+
+def run_sweep(model_name, grid=None, subjects=None, n_folds=5):
     """Evaluates each hyperparameter combination across subjects.
 
     Parameters
@@ -100,19 +155,22 @@ def run_sweep(model_name, grid=None, subjects=None):
         `DEFAULT_GRIDS[model_name]`.
     subjects : list of int, optional
         Subjects to evaluate each config on; defaults to SUBJECT_IDS.
+    n_folds : int
+        1 for a single 80/20 split per subject; >=2 for that many
+        stratified cross-validation folds per subject.
 
     Returns
     -------
     list of dict
         One entry per config, sorted by descending mean validation
-        accuracy: the overrides, per-subject validation accuracies, and
-        their mean.
+        accuracy: the overrides, per-subject split-level accuracies, and
+        the overall mean across all subjects and splits.
     """
     grid     = grid or DEFAULT_GRIDS[model_name]
     subjects = subjects or SUBJECT_IDS
     configs  = expand_grid(grid)
 
-    print(f"[sweep:{model_name}] {len(configs)} configs x {len(subjects)} subjects")
+    print(f"[sweep:{model_name}] {len(configs)} configs x {len(subjects)} subjects x {n_folds} split(s)")
 
     # Loaded once per subject; reused across every config below, since
     # data loading does not depend on the hyperparameters being swept.
@@ -120,19 +178,27 @@ def run_sweep(model_name, grid=None, subjects=None):
 
     sweep_results = []
     for overrides in configs:
-        cfg      = build_config(model_name, overrides)
-        val_accs = []
+        cfg = build_config(model_name, overrides)
+
+        subject_results = []
+        all_split_accs  = []
         for sid in subjects:
             X_train_full, y_train_full = data_cache[sid]
-            _, val_acc = fit(X_train_full, y_train_full, model_name, cfg, subject_id=sid)
-            val_accs.append(val_acc)
+            split_accs = evaluate_subject(X_train_full, y_train_full, model_name, cfg, n_folds, subject_id=sid)
+            mean_acc   = sum(split_accs) / len(split_accs)
+            subject_results.append({
+                "subject":          sid,
+                "split_accuracies": split_accs,
+                "mean_accuracy":    mean_acc,
+            })
+            all_split_accs.extend(split_accs)
 
-        mean_acc = sum(val_accs) / len(val_accs)
-        print(f"[sweep:{model_name}] {overrides} -> mean val_acc={mean_acc:.3f}")
+        overall_mean = sum(all_split_accs) / len(all_split_accs)
+        print(f"[sweep:{model_name}] {overrides} -> mean val_acc={overall_mean:.3f} (across all subjects/splits)")
         sweep_results.append({
             **overrides,
-            "mean_val_accuracy": mean_acc,
-            "val_accuracies":    val_accs,
+            "mean_val_accuracy": overall_mean,
+            "subjects":          subject_results,
         })
 
     sweep_results.sort(key=lambda r: r["mean_val_accuracy"], reverse=True)
@@ -143,7 +209,7 @@ def run_sweep(model_name, grid=None, subjects=None):
         json.dump(sweep_results, f, indent=2)
 
     best = sweep_results[0]
-    print(f"[sweep:{model_name}] best: { {k: v for k, v in best.items() if k != 'val_accuracies'} }")
+    print(f"[sweep:{model_name}] best: { {k: v for k, v in best.items() if k != 'subjects'} }")
 
     return sweep_results
 
@@ -151,6 +217,10 @@ def run_sweep(model_name, grid=None, subjects=None):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("model", choices=list(DEFAULT_GRIDS.keys()))
+    parser.add_argument(
+        "--n-folds", type=int, default=5,
+        help="1 for a single 80/20 split per subject; >=2 for that many stratified CV folds (default: 5).",
+    )
     args = parser.parse_args()
 
-    run_sweep(args.model)
+    run_sweep(args.model, n_folds=args.n_folds)
