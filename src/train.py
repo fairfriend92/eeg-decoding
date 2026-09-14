@@ -1,9 +1,14 @@
 """Per-subject training loop for EEGNet and EEG Conformer models.
 
-n_folds=1 (default): single 80/20 split per subject, one model.
-n_folds>=2: stratified k-fold cross-validation per subject, one model per
-fold, plus a softmax-averaged ensemble score -- more expensive, gives
-fold-level test accuracy/kappa (mean +/- std) instead of a single draw.
+Trains and checkpoints only -- never touches the test session (session_E).
+See evaluate.py for scoring saved checkpoints on the test set, kept as a
+deliberately separate step so evaluation logic can change (new metrics,
+different ensembling, bug fixes) without needing to retrain.
+
+n_folds=1 (default): single 80/20 split per subject, one checkpoint.
+n_folds>=2: stratified k-fold cross-validation per subject, one checkpoint
+per fold. Writes output/{model}_checkpoints.json, a manifest of checkpoint
+paths and validation accuracies for evaluate.py to consume.
 
 Must be run with this file's own directory (src/) as the script's
 directory, e.g. `python train.py` from within src/, or `python src/train.py`
@@ -14,7 +19,6 @@ imports used throughout src/.
 
 import argparse
 import json
-import statistics
 
 import torch
 import torch.nn as nn
@@ -295,16 +299,17 @@ def fit(X_train_full, y_train_full, model_name, cfg: Config, subject_id=None):
 
 
 def train_one_subject(subject_id, model_name, cfg: Config, n_folds=1):
-    """Loads a subject's data, fits model(s), saves them, evaluates on test.
+    """Loads a subject's training data and fits model(s), saving checkpoints.
+
+    Does not touch test data (session_E) -- this function only trains and
+    checkpoints; see evaluate.py for scoring saved checkpoints on the test
+    set, kept as a separate step.
 
     n_folds=1 (default): single 80/20 split, one model, one checkpoint --
     unchanged from the original behavior.
 
     n_folds>=2: stratified k-fold cross-validation over session_T, one
-    model per fold, each saved separately. Reports fold-level test
-    accuracy/kappa as mean +/- std (matching the project's fold-level
-    reporting standard) plus a softmax-averaged ensemble score across the
-    fold models.
+    model per fold, each saved separately.
 
     Parameters
     ----------
@@ -320,15 +325,12 @@ def train_one_subject(subject_id, model_name, cfg: Config, n_folds=1):
     Returns
     -------
     dict
-        n_folds=1: subject id, val accuracy, test accuracy, test kappa,
+        n_folds=1: subject id, val accuracy, checkpoint path.
+        n_folds>=2: subject id, n_folds, and per-fold val accuracy +
         checkpoint path.
-        n_folds>=2: subject id, mean/std test accuracy and kappa across
-        folds, ensemble test accuracy and kappa, and per-fold detail.
     """
-    device = torch.device(cfg.train.device if torch.cuda.is_available() else "cpu")
-
     print(f"[{model_name}] subject {subject_id}: loading and epoching EEG data...")
-    X_train_full, y_train_full, X_test, y_test = get_subject_data(subject_id, cfg.data)
+    X_train_full, y_train_full, _, _ = get_subject_data(subject_id, cfg.data)
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -337,28 +339,20 @@ def train_one_subject(subject_id, model_name, cfg: Config, n_folds=1):
 
         ckpt_path = OUTPUT_DIR / f"{model_name}_subject{subject_id}.pt"
         torch.save(model.state_dict(), ckpt_path)
-
-        test_acc, test_kappa = evaluate_arrays(model, X_test, y_test, device, cfg.train.batch_size)
-        print(
-            f"[{model_name}] subject {subject_id}: done - "
-            f"val_acc={best_val_acc:.3f}, test_acc={test_acc:.3f}, test_kappa={test_kappa:.3f}"
-        )
+        print(f"[{model_name}] subject {subject_id}: done - val_acc={best_val_acc:.3f}")
 
         return {
-            "subject":       subject_id,
-            "model":         model_name,
-            "n_folds":       1,
-            "val_accuracy":  best_val_acc,
-            "test_accuracy": test_acc,
-            "test_kappa":    test_kappa,
-            "checkpoint":    str(ckpt_path),
+            "subject":      subject_id,
+            "model":        model_name,
+            "n_folds":      1,
+            "val_accuracy": best_val_acc,
+            "checkpoint":   str(ckpt_path),
         }
 
     base_seed = cfg.train.seed + subject_id
     splitter  = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=base_seed)
 
     fold_results = []
-    fold_models  = []
     for fold_idx, (train_idx, val_idx) in enumerate(splitter.split(X_train_full, y_train_full)):
         model, val_acc = fit_on_split(
             X_train_full[train_idx], y_train_full[train_idx],
@@ -368,51 +362,27 @@ def train_one_subject(subject_id, model_name, cfg: Config, n_folds=1):
 
         ckpt_path = OUTPUT_DIR / f"{model_name}_subject{subject_id}_fold{fold_idx}.pt"
         torch.save(model.state_dict(), ckpt_path)
-
-        test_acc, test_kappa = evaluate_arrays(model, X_test, y_test, device, cfg.train.batch_size)
-        print(
-            f"[{model_name}] subject {subject_id} fold {fold_idx}: "
-            f"val_acc={val_acc:.3f}, test_acc={test_acc:.3f}, test_kappa={test_kappa:.3f}"
-        )
+        print(f"[{model_name}] subject {subject_id} fold {fold_idx}: val_acc={val_acc:.3f}")
 
         fold_results.append({
-            "fold":          fold_idx,
-            "val_accuracy":  val_acc,
-            "test_accuracy": test_acc,
-            "test_kappa":    test_kappa,
-            "checkpoint":    str(ckpt_path),
+            "fold":         fold_idx,
+            "val_accuracy": val_acc,
+            "checkpoint":   str(ckpt_path),
         })
-        fold_models.append(model)
 
-    test_accs   = [r["test_accuracy"] for r in fold_results]
-    test_kappas = [r["test_kappa"] for r in fold_results]
-    ensemble_test_acc, ensemble_test_kappa = evaluate_ensemble(
-        fold_models, X_test, y_test, device, cfg.train.batch_size
-    )
-
-    print(
-        f"[{model_name}] subject {subject_id}: done - "
-        f"test_acc={statistics.mean(test_accs):.3f}+/-{statistics.stdev(test_accs):.3f}, "
-        f"test_kappa={statistics.mean(test_kappas):.3f}+/-{statistics.stdev(test_kappas):.3f}, "
-        f"ensemble_test_acc={ensemble_test_acc:.3f}, ensemble_test_kappa={ensemble_test_kappa:.3f}"
-    )
+    print(f"[{model_name}] subject {subject_id}: done training {n_folds} folds")
 
     return {
-        "subject":                subject_id,
-        "model":                  model_name,
-        "n_folds":                n_folds,
-        "test_accuracy":          statistics.mean(test_accs),
-        "test_accuracy_std":      statistics.stdev(test_accs),
-        "test_kappa":             statistics.mean(test_kappas),
-        "test_kappa_std":         statistics.stdev(test_kappas),
-        "ensemble_test_accuracy": ensemble_test_acc,
-        "ensemble_test_kappa":    ensemble_test_kappa,
-        "fold_results":           fold_results,
+        "subject":      subject_id,
+        "model":        model_name,
+        "n_folds":      n_folds,
+        "fold_results": fold_results,
     }
 
 
 def run_all_subjects(model_name, cfg: Config = None, n_folds=1):
-    """Trains one model (or one per fold) per subject; writes results to disk.
+    """Trains one model (or one per fold) per subject; writes a checkpoint
+    manifest to disk.
 
     Parameters
     ----------
@@ -427,7 +397,8 @@ def run_all_subjects(model_name, cfg: Config = None, n_folds=1):
     Returns
     -------
     list of dict
-        Per-subject results, in subject order.
+        Per-subject checkpoint manifest entries, in subject order. See
+        evaluate.py to score these checkpoints on the test set.
     """
     cfg = cfg or Config()
     print(
@@ -437,10 +408,11 @@ def run_all_subjects(model_name, cfg: Config = None, n_folds=1):
     results = [train_one_subject(sid, model_name, cfg, n_folds=n_folds) for sid in SUBJECT_IDS]
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    results_path = OUTPUT_DIR / f"{model_name}_results.json"
-    with open(results_path, "w") as f:
+    manifest_path = OUTPUT_DIR / f"{model_name}_checkpoints.json"
+    with open(manifest_path, "w") as f:
         json.dump(results, f, indent=2)
 
+    print(f"[{model_name}] checkpoint manifest written to {manifest_path}")
     return results
 
 
@@ -450,7 +422,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--n-folds", type=int, default=1,
         help="1 for a single 80/20 split per subject (default); >=2 for that many "
-             "stratified CV folds per subject, with an added softmax-averaged ensemble score.",
+             "stratified CV folds per subject. Writes checkpoints only -- run evaluate.py next.",
     )
     args = parser.parse_args()
 

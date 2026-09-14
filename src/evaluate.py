@@ -1,72 +1,237 @@
-"""Aggregates per-subject results into summary statistics across subjects.
+"""Scores train.py's saved checkpoints on the held-out test set (session_E).
+
+Deliberately separate from train.py: evaluation logic (new metrics,
+ensembling changes, bug fixes) can change without retraining, since
+checkpoints already exist on disk. Relies on config.py's model
+hyperparameters matching what was used at training time -- do not change
+config.py between running train.py and this script.
+
+n_folds=1 checkpoints: reports test accuracy/kappa directly.
+n_folds>=2 checkpoints: reports fold-mean test accuracy/kappa (mean +/-
+std across the fold models' individual scores) and ensemble test
+accuracy/kappa (scoring the fold models' averaged predictions, which
+differs from -- and is typically higher than -- the fold mean, since
+averaging predictions cancels out each model's individual errors rather
+than just averaging their scores).
 
 Must be run with this file's own directory (src/) as the script's
-directory, e.g. `python evaluate.py` from within src/, or
-`python src/evaluate.py` from the repository root — see train.py for why.
+directory -- see train.py for why.
 """
 
 import argparse
 import json
+import statistics
 
-import numpy as np
+import torch
 
-from config import OUTPUT_DIR
+from config import N_CHANNELS, N_CLASSES, OUTPUT_DIR, Config
+from data_loader import get_subject_data
+from models.conformer import EEGConformer
+from models.eegnet import EEGNet
+from train import evaluate_arrays, evaluate_ensemble
+
+MODEL_REGISTRY = {
+    "eegnet": EEGNet,
+    "conformer": EEGConformer,
+}
 
 
-def load_results(model_name):
-    """Loads per-subject results for a given model.
+def load_checkpoint(checkpoint_path, model_name, n_times, cfg: Config, device):
+    """Reconstructs a model from current config.py and loads saved weights.
+
+    Parameters
+    ----------
+    checkpoint_path : str
+        Path to a .pt file written by train.py.
+    model_name : str
+        Either "eegnet" or "conformer".
+    n_times : int
+        Number of time samples per epoch, needed to reconstruct the
+        model's architecture.
+    cfg : Config
+        Full project configuration -- must match what was used to train
+        this checkpoint.
+    device : torch.device
+        Device to load the model onto.
+
+    Returns
+    -------
+    nn.Module
+        The loaded model, in eval mode.
+    """
+    model_cls = MODEL_REGISTRY[model_name]
+    model_cfg = getattr(cfg, model_name)
+    model     = model_cls(N_CHANNELS, n_times, N_CLASSES, model_cfg).to(device)
+    model.load_state_dict(torch.load(checkpoint_path, map_location=device))
+    model.eval()
+    return model
+
+
+def evaluate_subject(entry, model_name, cfg: Config):
+    """Scores one subject's checkpoint(s) from a train.py manifest entry.
+
+    Parameters
+    ----------
+    entry : dict
+        One entry from output/{model}_checkpoints.json.
+    model_name : str
+        Either "eegnet" or "conformer".
+    cfg : Config
+        Full project configuration -- must match what was used to train
+        the checkpoint(s).
+
+    Returns
+    -------
+    dict
+        n_folds=1: subject id, val accuracy, test accuracy, test kappa.
+        n_folds>=2: subject id, fold-mean test accuracy/kappa (mean +/-
+        std), ensemble test accuracy/kappa, and per-fold detail.
+    """
+    device = torch.device(cfg.train.device if torch.cuda.is_available() else "cpu")
+
+    subject_id = entry["subject"]
+    _, _, X_test, y_test = get_subject_data(subject_id, cfg.data)
+    n_times = X_test.shape[-1]
+
+    if entry["n_folds"] == 1:
+        model = load_checkpoint(entry["checkpoint"], model_name, n_times, cfg, device)
+        test_acc, test_kappa = evaluate_arrays(model, X_test, y_test, device, cfg.train.batch_size)
+        print(f"[{model_name}] subject {subject_id}: test_acc={test_acc:.3f}, test_kappa={test_kappa:.3f}")
+
+        return {
+            "subject":       subject_id,
+            "model":         model_name,
+            "n_folds":       1,
+            "val_accuracy":  entry["val_accuracy"],
+            "test_accuracy": test_acc,
+            "test_kappa":    test_kappa,
+        }
+
+    fold_results = []
+    fold_models  = []
+    for fold_entry in entry["fold_results"]:
+        model = load_checkpoint(fold_entry["checkpoint"], model_name, n_times, cfg, device)
+        test_acc, test_kappa = evaluate_arrays(model, X_test, y_test, device, cfg.train.batch_size)
+        print(
+            f"[{model_name}] subject {subject_id} fold {fold_entry['fold']}: "
+            f"test_acc={test_acc:.3f}, test_kappa={test_kappa:.3f}"
+        )
+        fold_results.append({
+            "fold":          fold_entry["fold"],
+            "val_accuracy":  fold_entry["val_accuracy"],
+            "test_accuracy": test_acc,
+            "test_kappa":    test_kappa,
+        })
+        fold_models.append(model)
+
+    test_accs   = [r["test_accuracy"] for r in fold_results]
+    test_kappas = [r["test_kappa"] for r in fold_results]
+    ensemble_test_acc, ensemble_test_kappa = evaluate_ensemble(
+        fold_models, X_test, y_test, device, cfg.train.batch_size
+    )
+    print(
+        f"[{model_name}] subject {subject_id}: fold-mean test_acc="
+        f"{statistics.mean(test_accs):.3f}+/-{statistics.stdev(test_accs):.3f}, "
+        f"ensemble test_acc={ensemble_test_acc:.3f}"
+    )
+
+    return {
+        "subject":                subject_id,
+        "model":                  model_name,
+        "n_folds":                entry["n_folds"],
+        "test_accuracy":          statistics.mean(test_accs),
+        "test_accuracy_std":      statistics.stdev(test_accs),
+        "test_kappa":             statistics.mean(test_kappas),
+        "test_kappa_std":         statistics.stdev(test_kappas),
+        "ensemble_test_accuracy": ensemble_test_acc,
+        "ensemble_test_kappa":    ensemble_test_kappa,
+        "fold_results":           fold_results,
+    }
+
+
+def evaluate_all(model_name, cfg: Config = None):
+    """Loads a checkpoint manifest and scores every subject's checkpoint(s).
 
     Parameters
     ----------
     model_name : str
         Either "eegnet" or "conformer".
+    cfg : Config, optional
+        Full project configuration; defaults to `Config()`. Must match
+        what was used to train the checkpoints being loaded.
 
     Returns
     -------
     list of dict
-        Per-subject result dictionaries, as written by train.run_all_subjects.
+        Per-subject evaluation results, in subject order.
     """
-    path = OUTPUT_DIR / f"{model_name}_results.json"
-    with open(path) as f:
-        return json.load(f)
+    cfg = cfg or Config()
+
+    manifest_path = OUTPUT_DIR / f"{model_name}_checkpoints.json"
+    with open(manifest_path) as f:
+        manifest = json.load(f)
+
+    results = [evaluate_subject(entry, model_name, cfg) for entry in manifest]
+
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    results_path = OUTPUT_DIR / f"{model_name}_results.json"
+    with open(results_path, "w") as f:
+        json.dump(results, f, indent=2)
+
+    return results
 
 
 def summarize(results):
-    """Computes mean and std of test accuracy and kappa across subjects.
+    """Aggregates per-subject results into summary statistics across subjects.
 
-    Standard deviation uses ddof=1 (sample std), appropriate given the
-    9 subjects are treated as a sample rather than the full population of
-    interest.
+    Standard deviation uses ddof=1 (sample std). For n_folds>=2 results,
+    also aggregates the ensemble metrics.
 
     Parameters
     ----------
     results : list of dict
-        Per-subject results, each containing "test_accuracy" and "test_kappa".
+        Per-subject results, as returned by `evaluate_all`.
 
     Returns
     -------
     dict
-        Mean and std for both metrics, plus subject count.
+        n_folds=1: accuracy/kappa mean and std, subject count.
+        n_folds>=2: fold-mean accuracy/kappa mean and std, ensemble
+        accuracy/kappa mean and std, subject count, n_folds.
     """
-    accuracies = np.array([r["test_accuracy"] for r in results])
-    kappas     = np.array([r["test_kappa"] for r in results])
+    n_folds    = results[0]["n_folds"]
+    accuracies = [r["test_accuracy"] for r in results]
+    kappas     = [r["test_kappa"] for r in results]
 
-    return {
+    summary = {
         "n_subjects":    len(results),
-        "accuracy_mean": float(accuracies.mean()),
-        "accuracy_std":  float(accuracies.std(ddof=1)),
-        "kappa_mean":    float(kappas.mean()),
-        "kappa_std":     float(kappas.std(ddof=1)),
+        "n_folds":       n_folds,
+        "accuracy_mean": statistics.mean(accuracies),
+        "accuracy_std":  statistics.stdev(accuracies),
+        "kappa_mean":    statistics.mean(kappas),
+        "kappa_std":     statistics.stdev(kappas),
     }
 
+    if n_folds >= 2:
+        ensemble_accs   = [r["ensemble_test_accuracy"] for r in results]
+        ensemble_kappas = [r["ensemble_test_kappa"] for r in results]
+        summary["ensemble_accuracy_mean"] = statistics.mean(ensemble_accs)
+        summary["ensemble_accuracy_std"]  = statistics.stdev(ensemble_accs)
+        summary["ensemble_kappa_mean"]    = statistics.mean(ensemble_kappas)
+        summary["ensemble_kappa_std"]     = statistics.stdev(ensemble_kappas)
 
-def compare_models(model_names):
-    """Loads, summarizes, and reports results for one or more models.
+    return summary
+
+
+def compare_models(model_names, cfg: Config = None):
+    """Evaluates, summarizes, and reports results for one or more models.
 
     Parameters
     ----------
     model_names : list of str
-        Models to summarize, e.g. ["eegnet", "conformer"].
+        Models to evaluate, e.g. ["eegnet", "conformer"].
+    cfg : Config, optional
+        Full project configuration; defaults to `Config()`.
 
     Returns
     -------
@@ -75,14 +240,27 @@ def compare_models(model_names):
     """
     summaries = {}
     for name in model_names:
-        results = load_results(name)
+        results = evaluate_all(name, cfg)
         summary = summarize(results)
         summaries[name] = summary
-        print(
-            f"{name}: accuracy = {summary['accuracy_mean']:.3f} +/- {summary['accuracy_std']:.3f}, "
-            f"kappa = {summary['kappa_mean']:.3f} +/- {summary['kappa_std']:.3f} "
-            f"(n={summary['n_subjects']})"
-        )
+
+        if summary["n_folds"] == 1:
+            print(
+                f"{name}: accuracy = {summary['accuracy_mean']:.3f} +/- {summary['accuracy_std']:.3f}, "
+                f"kappa = {summary['kappa_mean']:.3f} +/- {summary['kappa_std']:.3f} "
+                f"(n={summary['n_subjects']})"
+            )
+        else:
+            print(
+                f"{name}: fold-mean accuracy = {summary['accuracy_mean']:.3f} +/- {summary['accuracy_std']:.3f}, "
+                f"kappa = {summary['kappa_mean']:.3f} +/- {summary['kappa_std']:.3f} "
+                f"(n_folds={summary['n_folds']}, n={summary['n_subjects']})"
+            )
+            print(
+                f"{name}: ensemble accuracy = {summary['ensemble_accuracy_mean']:.3f} +/- "
+                f"{summary['ensemble_accuracy_std']:.3f}, kappa = {summary['ensemble_kappa_mean']:.3f} +/- "
+                f"{summary['ensemble_kappa_std']:.3f}"
+            )
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     summary_path = OUTPUT_DIR / "summary.json"
@@ -94,7 +272,7 @@ def compare_models(model_names):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("models", nargs="+", choices=["eegnet", "conformer"])
+    parser.add_argument("models", nargs="+", choices=list(MODEL_REGISTRY.keys()))
     args = parser.parse_args()
 
     compare_models(args.models)
