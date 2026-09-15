@@ -127,6 +127,43 @@ def normalize_subject(X_train, X_test, eps=1e-8):
     return X_train, X_test
 
 
+def crop_trials(X, y, crop_size, stride):
+    """Slices each trial into overlapping fixed-length crops.
+
+    Parameters
+    ----------
+    X : ndarray, shape (n_trials, n_channels, n_times)
+        Trials to crop.
+    y : ndarray, shape (n_trials,)
+        Trial labels.
+    crop_size : int
+        Crop length, in samples.
+    stride : int
+        Step between consecutive crop start positions, in samples.
+
+    Returns
+    -------
+    X_cropped : ndarray, shape (n_trials * n_crops, n_channels, crop_size)
+        Cropped trials.
+    y_cropped : ndarray, shape (n_trials * n_crops,)
+        Label for each crop (same as its source trial's label).
+    trial_index : ndarray, shape (n_trials * n_crops,)
+        Index of the source trial for each crop, so crops from the same
+        trial can be grouped back together (e.g. for prediction averaging).
+    """
+    n_times = X.shape[-1]
+    starts  = list(range(0, n_times - crop_size + 1, stride))
+
+    X_cropped, y_cropped, trial_index = [], [], []
+    for trial_idx, (trial, label) in enumerate(zip(X, y)):
+        for start in starts:
+            X_cropped.append(trial[:, start:start + crop_size])
+            y_cropped.append(label)
+            trial_index.append(trial_idx)
+
+    return np.stack(X_cropped), np.array(y_cropped), np.array(trial_index)
+
+
 def get_subject_data(subject_id, cfg: DataConfig):
     """Loads, splits, and normalizes a single subject's data in one call.
 

@@ -124,7 +124,7 @@ def evaluate_subject(X, y, model_name, cfg: Config, n_folds, subject_id=None):
         length n_folds).
     """
     if n_folds == 1:
-        _, val_acc = fit(X, y, model_name, cfg, subject_id=subject_id)
+        _, val_acc, _ = fit(X, y, model_name, cfg, subject_id=subject_id)
         return [val_acc]
 
     base_seed = cfg.train.seed if subject_id is None else cfg.train.seed + subject_id
@@ -134,7 +134,7 @@ def evaluate_subject(X, y, model_name, cfg: Config, n_folds, subject_id=None):
     for fold_idx, (train_idx, val_idx) in enumerate(splitter.split(X, y)):
         # Distinct seed per fold, so folds don't all train from identical
         # initialization; still reproducible given (subject, fold).
-        _, val_acc = fit_on_split(
+        _, val_acc, _ = fit_on_split(
             X[train_idx], y[train_idx], X[val_idx], y[val_idx], model_name, cfg,
             subject_id=subject_id, seed=base_seed + fold_idx,
         )

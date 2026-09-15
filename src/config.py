@@ -44,6 +44,41 @@ class DataConfig:
 
 
 @dataclass
+class CroppedConfig:
+    """Parameters for optional crop-based training and evaluation.
+
+    Only used when explicitly enabled (see train.py --cropped). Training
+    trials are sliced into overlapping crops as extra training examples,
+    using crop_stride (coarser, to keep the crop-multiplied training set
+    a manageable size). Validation/test trials are scored by cropping
+    with eval_crop_stride instead (denser -- evaluation is done far fewer
+    times than training, so a smoother, more accurate per-trial average
+    from more overlapping crops is cheap to afford) and averaging
+    predictions per trial.
+
+    crop_size must match between training and evaluation, since it fixes
+    the model's input length; only the crop density (stride) may differ.
+
+    Defaults assume a 250 Hz, 4s (1000-sample) trial: crop_size=500 (2s).
+    Revisit these if DataConfig.resample_freq or tmax change.
+
+    Parameters
+    ----------
+    crop_size : int
+        Crop length, in samples. Fixes the model's input length.
+    crop_stride : int
+        Step between crop start positions during training, in samples.
+    eval_crop_stride : int
+        Step between crop start positions during validation/test scoring,
+        in samples. Denser (smaller) than crop_stride by design.
+    """
+
+    crop_size: int = 500
+    crop_stride: int = 125
+    eval_crop_stride: int = 125
+
+
+@dataclass
 class ConformerConfig:
     """Architecture and optimization parameters for the transformer encoder.
 
@@ -148,3 +183,4 @@ class Config:
     conformer: ConformerConfig  = field(default_factory=ConformerConfig)
     eegnet:    EEGNetConfig     = field(default_factory=EEGNetConfig)
     train:     TrainConfig      = field(default_factory=TrainConfig)
+    cropped:   CroppedConfig    = field(default_factory=CroppedConfig)
