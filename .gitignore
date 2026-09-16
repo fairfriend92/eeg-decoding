@@ -1,4 +1,4 @@
 data/
 output/
 !output/figures/
-!output/figures/*
+!output/figures/**
