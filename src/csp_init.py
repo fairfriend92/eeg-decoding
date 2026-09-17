@@ -53,7 +53,10 @@ def csp_initialize(model, X_train, y_train, device):
 
     new_weight = np.zeros((out_channels, 1, n_channels, 1), dtype=np.float32)
     for band in range(f1):
-        csp = CSP(n_components=d, reg="ledoit_wolf", log=False, norm_trace=False)
+        # verbose=False silences mne's own per-class covariance-estimation
+        # logging ("Estimating class=k covariance... Done."), which is
+        # otherwise printed at its default INFO level on every fit() call.
+        csp = CSP(n_components=d, reg="ledoit_wolf", log=False, norm_trace=False, verbose=False)
         csp.fit(band_signals[:, band, :, :].astype(np.float64), y_train)
         filters = csp.filters_[:d]                              # (d, n_channels)
         filters = filters / (np.linalg.norm(filters, axis=1, keepdims=True) + 1e-8)

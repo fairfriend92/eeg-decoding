@@ -10,6 +10,10 @@ split(s) above (see compute_matched_epochs), saved as a separate "final"
 checkpoint. Writes output/{model}_checkpoints.json, a manifest of
 checkpoint paths and validation accuracies.
 
+--csp-init (EEGNet only) and --pretrain (both models) are optional,
+off-by-default alternatives to random weight init -- see csp_init.py and
+pretrain_loso respectively.
+
 Must be run with this file's own directory (src/) as the script's
 directory, e.g. `python train.py` from within src/, or `python src/train.py`
 from the repository root. Do not invoke via `python -m src.train`, which
@@ -279,7 +283,7 @@ def evaluate_ensemble_cropped(models, X, y, cropped_cfg, device, batch_size):
 
 
 
-def fit_on_split(X_train, y_train, X_val, y_val, model_name, cfg: Config, subject_id=None, seed=None, cropped_cfg=None, csp_init=False):
+def fit_on_split(X_train, y_train, X_val, y_val, model_name, cfg: Config, subject_id=None, seed=None, cropped_cfg=None, csp_init=False, init_state=None):
     """Trains a single model on an explicit train/val split, with early
     stopping.
 
@@ -309,7 +313,13 @@ def fit_on_split(X_train, y_train, X_val, y_val, model_name, cfg: Config, subjec
     csp_init : bool
         EEGNet only. If True, initializes the depthwise spatial_conv
         weights via per-temporal-band CSP (see csp_init.py) instead of
-        the default random init, before training starts.
+        the default random init, before training starts. Ignored if
+        init_state is given.
+    init_state : dict, optional
+        A state_dict to load into the model right after construction,
+        overriding both the default random init and csp_init (e.g. a
+        LOSO-pretrained checkpoint -- see pretrain_loso). Training then
+        fine-tunes from these weights instead of from scratch.
 
     Returns
     -------
@@ -344,7 +354,10 @@ def fit_on_split(X_train, y_train, X_val, y_val, model_name, cfg: Config, subjec
     model_cfg = getattr(cfg, model_name)
     model     = model_cls(N_CHANNELS, n_times, N_CLASSES, model_cfg).to(device)
 
-    if csp_init:
+    if init_state is not None:
+        print(f"[{model_name}] {label}: initializing from pretrained state (fine-tuning)")
+        model.load_state_dict(init_state)
+    elif csp_init:
         if model_name != "eegnet":
             raise ValueError(f"csp_init is only supported for eegnet, got model_name={model_name!r}")
         print(f"[{model_name}] {label}: initializing spatial_conv via per-band CSP")
@@ -401,7 +414,7 @@ def fit_on_split(X_train, y_train, X_val, y_val, model_name, cfg: Config, subjec
     return model, best_val_acc, best_epoch
 
 
-def fit(X_train_full, y_train_full, model_name, cfg: Config, subject_id=None, cropped_cfg=None, csp_init=False):
+def fit(X_train_full, y_train_full, model_name, cfg: Config, subject_id=None, seed=None, cropped_cfg=None, csp_init=False, init_state=None):
     """Trains a single model on already-loaded data, with early stopping.
 
     Splits the given training data into a single 80/20 train/validation
@@ -420,11 +433,19 @@ def fit(X_train_full, y_train_full, model_name, cfg: Config, subject_id=None, cr
         Full project configuration.
     subject_id : int, optional
         Used only to label progress messages.
+    seed : int, optional
+        Seeds model init and the training loader's shuffle order. Defaults
+        to `cfg.train.seed` (or `cfg.train.seed + subject_id` if given) --
+        see fit_on_split. A caller needing a seed distinct from the default
+        (e.g. LOSO pretraining, which must not collide with the per-subject
+        fine-tuning seed) should pass one explicitly.
     cropped_cfg : CroppedConfig, optional
         If given, enables crop-based training/validation -- see
         fit_on_split.
     csp_init : bool
         EEGNet only. See fit_on_split.
+    init_state : dict, optional
+        See fit_on_split.
 
     Returns
     -------
@@ -441,7 +462,7 @@ def fit(X_train_full, y_train_full, model_name, cfg: Config, subject_id=None, cr
     )
     return fit_on_split(
         X_train, y_train, X_val, y_val, model_name, cfg,
-        subject_id=subject_id, cropped_cfg=cropped_cfg, csp_init=csp_init,
+        subject_id=subject_id, seed=seed, cropped_cfg=cropped_cfg, csp_init=csp_init, init_state=init_state,
     )
 
 
@@ -481,7 +502,7 @@ def compute_matched_epochs(epoch_train_pairs, n_train_full, batch_size):
     return max(1, round(mean_steps / steps_per_epoch_full))
 
 
-def fit_full(X, y, model_name, cfg: Config, n_epochs, subject_id=None, seed=None, cropped_cfg=None, csp_init=False):
+def fit_full(X, y, model_name, cfg: Config, n_epochs, subject_id=None, seed=None, cropped_cfg=None, csp_init=False, init_state=None):
     """Trains a model on the full dataset for a fixed number of epochs,
     with no validation split and no early stopping.
 
@@ -510,6 +531,8 @@ def fit_full(X, y, model_name, cfg: Config, n_epochs, subject_id=None, seed=None
         built with crop_size as its input length).
     csp_init : bool
         EEGNet only. See fit_on_split.
+    init_state : dict, optional
+        See fit_on_split.
 
     Returns
     -------
@@ -537,7 +560,10 @@ def fit_full(X, y, model_name, cfg: Config, n_epochs, subject_id=None, seed=None
     model_cfg = getattr(cfg, model_name)
     model     = model_cls(N_CHANNELS, n_times, N_CLASSES, model_cfg).to(device)
 
-    if csp_init:
+    if init_state is not None:
+        print(f"[{model_name}] {label}: initializing from pretrained state (fine-tuning)")
+        model.load_state_dict(init_state)
+    elif csp_init:
         if model_name != "eegnet":
             raise ValueError(f"csp_init is only supported for eegnet, got model_name={model_name!r}")
         print(f"[{model_name}] {label}: initializing spatial_conv via per-band CSP")
@@ -563,7 +589,84 @@ def fit_full(X, y, model_name, cfg: Config, n_epochs, subject_id=None, seed=None
     return model
 
 
-def train_one_subject(subject_id, model_name, cfg: Config, n_folds=1, cropped_cfg=None, csp_init=False):
+PRETRAIN_SEED_OFFSET = 1000    # keeps LOSO-pretraining seeds distinct from per-subject/fold seeds
+
+
+def load_pooled_loso_data(subject_id, cfg: Config):
+    """Pools session_T training data from every subject except subject_id.
+
+    Used for leave-one-subject-out (LOSO) pretraining: subject_id is the
+    eventual fine-tuning target, so neither its training data nor its test
+    session ever contributes to the pretraining set.
+
+    Parameters
+    ----------
+    subject_id : int
+        Subject to exclude (the fine-tuning target).
+    cfg : Config
+        Full project configuration.
+
+    Returns
+    -------
+    X, y : ndarray
+        Pooled, per-subject-normalized training trials and labels from the
+        other len(SUBJECT_IDS) - 1 subjects.
+    """
+    X_list, y_list = [], []
+    for sid in SUBJECT_IDS:
+        if sid == subject_id:
+            continue
+        X_sid, y_sid, _, _ = get_subject_data(sid, cfg.data)
+        X_list.append(X_sid)
+        y_list.append(y_sid)
+    return np.concatenate(X_list, axis=0), np.concatenate(y_list, axis=0)
+
+
+def pretrain_loso(subject_id, model_name, cfg: Config, cropped_cfg=None, csp_init=False):
+    """Pretrains a model on every subject's data except subject_id.
+
+    Leave-one-subject-out pretraining: gives the target subject's
+    fine-tuning run a starting point shaped by cross-subject structure,
+    instead of random (or CSP) init, before the model ever sees subject_id's
+    own data. The pretraining run itself uses `fit`'s internal 80/20 split
+    (over the pooled cross-subject data) purely for early stopping.
+
+    Parameters
+    ----------
+    subject_id : int
+        The eventual fine-tuning target; excluded from the pretraining data.
+    model_name : str
+        Either "eegnet" or "conformer".
+    cfg : Config
+        Full project configuration.
+    cropped_cfg : CroppedConfig, optional
+        If given, enables crop-based training for the pretraining run too
+        (see fit_on_split) -- must match what the fine-tuning stage uses,
+        since it fixes the model's input length.
+    csp_init : bool
+        EEGNet only. Initializes spatial_conv via CSP fit on the pooled
+        pretraining data (rather than the target subject's own data) before
+        pretraining starts.
+
+    Returns
+    -------
+    dict
+        state_dict of the pretrained model (best-validation-accuracy
+        weights from the pretraining run), for use as `init_state` in the
+        target subject's own fit/fit_on_split/fit_full calls.
+    """
+    print(f"[{model_name}] subject {subject_id}: LOSO pretraining on the other {len(SUBJECT_IDS) - 1} subjects")
+    X_pool, y_pool = load_pooled_loso_data(subject_id, cfg)
+    model, val_acc, _ = fit(
+        X_pool, y_pool, model_name, cfg,
+        subject_id=subject_id, seed=cfg.train.seed + PRETRAIN_SEED_OFFSET + subject_id,
+        cropped_cfg=cropped_cfg, csp_init=csp_init,
+    )
+    print(f"[{model_name}] subject {subject_id}: LOSO pretraining done - val_acc={val_acc:.3f}")
+    return {k: v.cpu().clone() for k, v in model.state_dict().items()}
+
+
+def train_one_subject(subject_id, model_name, cfg: Config, n_folds=1, cropped_cfg=None, csp_init=False, pretrain=False):
     """Loads a subject's training data and fits model(s), saving checkpoints.
 
     Does not touch test data (session_E) -- this function only trains and
@@ -597,6 +700,13 @@ def train_one_subject(subject_id, model_name, cfg: Config, n_folds=1, cropped_cf
         evaluate.py knows to score these checkpoints via crop-averaging.
     csp_init : bool
         EEGNet only. See fit_on_split.
+    pretrain : bool
+        If True, first pretrains a model on every other subject's data
+        (see pretrain_loso), then fine-tunes from those weights instead of
+        from scratch -- for every fold and the final fit alike, since LOSO
+        pretraining excludes subject_id entirely and so does not depend on
+        the fold split. Overrides csp_init during fine-tuning (csp_init
+        still applies to the pretraining run itself).
 
     Returns
     -------
@@ -618,10 +728,15 @@ def train_one_subject(subject_id, model_name, cfg: Config, n_folds=1, cropped_cf
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
+    init_state = (
+        pretrain_loso(subject_id, model_name, cfg, cropped_cfg=cropped_cfg, csp_init=csp_init)
+        if pretrain else None
+    )
+
     if n_folds == 1:
         model, best_val_acc, best_epoch = fit(
             X_train_full, y_train_full, model_name, cfg, subject_id=subject_id,
-            cropped_cfg=cropped_cfg, csp_init=csp_init,
+            cropped_cfg=cropped_cfg, csp_init=csp_init, init_state=init_state,
         )
 
         ckpt_path = OUTPUT_DIR / f"{model_name}_subject{subject_id}.pt"
@@ -636,7 +751,7 @@ def train_one_subject(subject_id, model_name, cfg: Config, n_folds=1, cropped_cf
         )
         final_model = fit_full(
             X_train_full, y_train_full, model_name, cfg, final_n_epochs,
-            subject_id=subject_id, cropped_cfg=cropped_cfg, csp_init=csp_init,
+            subject_id=subject_id, cropped_cfg=cropped_cfg, csp_init=csp_init, init_state=init_state,
         )
         final_ckpt_path = OUTPUT_DIR / f"{model_name}_subject{subject_id}_final.pt"
         torch.save(final_model.state_dict(), final_ckpt_path)
@@ -662,7 +777,7 @@ def train_one_subject(subject_id, model_name, cfg: Config, n_folds=1, cropped_cf
             X_train_full[train_idx], y_train_full[train_idx],
             X_train_full[val_idx], y_train_full[val_idx],
             model_name, cfg, subject_id=subject_id, seed=base_seed + fold_idx,
-            cropped_cfg=cropped_cfg, csp_init=csp_init,
+            cropped_cfg=cropped_cfg, csp_init=csp_init, init_state=init_state,
         )
 
         ckpt_path = OUTPUT_DIR / f"{model_name}_subject{subject_id}_fold{fold_idx}.pt"
@@ -681,7 +796,7 @@ def train_one_subject(subject_id, model_name, cfg: Config, n_folds=1, cropped_cf
     final_n_epochs = compute_matched_epochs(epoch_train_pairs, n_train_full, cfg.train.batch_size)
     final_model = fit_full(
         X_train_full, y_train_full, model_name, cfg, final_n_epochs,
-        subject_id=subject_id, cropped_cfg=cropped_cfg, csp_init=csp_init,
+        subject_id=subject_id, cropped_cfg=cropped_cfg, csp_init=csp_init, init_state=init_state,
     )
     final_ckpt_path = OUTPUT_DIR / f"{model_name}_subject{subject_id}_final.pt"
     torch.save(final_model.state_dict(), final_ckpt_path)
@@ -697,7 +812,7 @@ def train_one_subject(subject_id, model_name, cfg: Config, n_folds=1, cropped_cf
     }
 
 
-def run_all_subjects(model_name, cfg: Config = None, n_folds=1, cropped_cfg=None, csp_init=False):
+def run_all_subjects(model_name, cfg: Config = None, n_folds=1, cropped_cfg=None, csp_init=False, pretrain=False):
     """Trains one model (or one per fold) per subject; writes a checkpoint
     manifest to disk.
 
@@ -715,6 +830,11 @@ def run_all_subjects(model_name, cfg: Config = None, n_folds=1, cropped_cfg=None
         subject (see fit_on_split).
     csp_init : bool
         EEGNet only. See fit_on_split.
+    pretrain : bool
+        See train_one_subject. Applies to both models -- multiplies total
+        training time by roughly (n_subjects - 1) / n_subjects extra work
+        per subject, since each subject also pretrains on pooled data from
+        the other 8.
 
     Returns
     -------
@@ -726,10 +846,12 @@ def run_all_subjects(model_name, cfg: Config = None, n_folds=1, cropped_cfg=None
     print(
         f"Training {model_name} for {len(SUBJECT_IDS)} subjects "
         f"(n_folds={n_folds}, cropped={cropped_cfg is not None}, csp_init={csp_init}, "
-        f"within-subject, official session_T/session_E split)"
+        f"pretrain={pretrain}, within-subject, official session_T/session_E split)"
     )
     results = [
-        train_one_subject(sid, model_name, cfg, n_folds=n_folds, cropped_cfg=cropped_cfg, csp_init=csp_init)
+        train_one_subject(
+            sid, model_name, cfg, n_folds=n_folds, cropped_cfg=cropped_cfg, csp_init=csp_init, pretrain=pretrain
+        )
         for sid in SUBJECT_IDS
     ]
 
@@ -759,10 +881,18 @@ if __name__ == "__main__":
         help="EEGNet only: initialize the depthwise spatial_conv via per-temporal-band CSP "
              "(see csp_init.py) instead of random init. Off by default.",
     )
+    parser.add_argument(
+        "--pretrain", action="store_true",
+        help="Both models: leave-one-subject-out pretraining on the other 8 subjects' pooled "
+             "data before fine-tuning on the target subject (see pretrain_loso). Roughly doubles "
+             "training time per subject. Off by default.",
+    )
     args = parser.parse_args()
 
     if args.csp_init and args.model != "eegnet":
         parser.error("--csp-init is only supported for the eegnet model")
 
     cropped_cfg = Config().cropped if args.cropped else None
-    run_all_subjects(args.model, n_folds=args.n_folds, cropped_cfg=cropped_cfg, csp_init=args.csp_init)
+    run_all_subjects(
+        args.model, n_folds=args.n_folds, cropped_cfg=cropped_cfg, csp_init=args.csp_init, pretrain=args.pretrain
+    )

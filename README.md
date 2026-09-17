@@ -23,6 +23,8 @@ than to an arbitrary held-out slice.
 |---|---|---|
 | EEGNet, ensemble (5-fold, cropped training) | 0.636 ± 0.168 | 0.525 ± 0.222 |
 | EEGNet, final-fit (100% of train session, cropped) | 0.632 ± 0.177 | 0.506 ± 0.224 |
+| EEGNet, ensemble (5-fold, cropped + CSP-init) | 0.685 ± 0.115 | 0.580 ± 0.154 |
+| EEGNet, final-fit (cropped + CSP-init) | 0.643 ± 0.119 | 0.524 ± 0.159 |
 | Conformer, ensemble (5-fold, cropped training) | 0.459 ± 0.160 | 0.278 ± 0.213 |
 | Conformer, final-fit (100% of train session, cropped) | 0.439 ± 0.139 | 0.253 ± 0.186 |
 
@@ -81,11 +83,13 @@ runtime (Colab or similar) is assumed for anything beyond a quick smoke test.
 
 Train:
 ```
-python train.py {eegnet,conformer} [--n-folds N] [--cropped]
+python train.py {eegnet,conformer} [--n-folds N] [--cropped] [--csp-init]
 ```
 `--n-folds` defaults to 1 (single 80/20 split); any value ≥2 runs stratified k-fold,
 producing one checkpoint per fold plus a final model retrained on the full training
-session. `--cropped` enables crop-based training/evaluation.
+session. `--cropped` enables crop-based training/evaluation. `--csp-init` initializes
+EEGNet's spatial filters from per-subject CSP components instead of random weights
+(EEGNet only).
 Writes `output/{model}_checkpoints.json`.
 
 Evaluate:
