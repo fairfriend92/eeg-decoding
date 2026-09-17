@@ -29,6 +29,7 @@ from sklearn.model_selection import StratifiedKFold, train_test_split
 from torch.utils.data import DataLoader, TensorDataset
 
 from config import N_CHANNELS, N_CLASSES, OUTPUT_DIR, SUBJECT_IDS, Config
+from csp_init import csp_initialize
 from data_loader import crop_trials, get_subject_data
 from models.conformer import EEGConformer
 from models.eegnet import EEGNet
@@ -278,7 +279,7 @@ def evaluate_ensemble_cropped(models, X, y, cropped_cfg, device, batch_size):
 
 
 
-def fit_on_split(X_train, y_train, X_val, y_val, model_name, cfg: Config, subject_id=None, seed=None, cropped_cfg=None):
+def fit_on_split(X_train, y_train, X_val, y_val, model_name, cfg: Config, subject_id=None, seed=None, cropped_cfg=None, csp_init=False):
     """Trains a single model on an explicit train/val split, with early
     stopping.
 
@@ -305,6 +306,10 @@ def fit_on_split(X_train, y_train, X_val, y_val, model_name, cfg: Config, subjec
         (the model is built with crop_size as its input length), and
         validation is scored via crop-averaged predictions on the whole
         X_val trials (see evaluate_cropped) rather than evaluate_loader.
+    csp_init : bool
+        EEGNet only. If True, initializes the depthwise spatial_conv
+        weights via per-temporal-band CSP (see csp_init.py) instead of
+        the default random init, before training starts.
 
     Returns
     -------
@@ -338,6 +343,12 @@ def fit_on_split(X_train, y_train, X_val, y_val, model_name, cfg: Config, subjec
     model_cls = MODEL_REGISTRY[model_name]
     model_cfg = getattr(cfg, model_name)
     model     = model_cls(N_CHANNELS, n_times, N_CLASSES, model_cfg).to(device)
+
+    if csp_init:
+        if model_name != "eegnet":
+            raise ValueError(f"csp_init is only supported for eegnet, got model_name={model_name!r}")
+        print(f"[{model_name}] {label}: initializing spatial_conv via per-band CSP")
+        csp_initialize(model, X_train_input, y_train_input, device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=model_cfg.lr, weight_decay=cfg.train.weight_decay)
     criterion = nn.CrossEntropyLoss()
@@ -390,7 +401,7 @@ def fit_on_split(X_train, y_train, X_val, y_val, model_name, cfg: Config, subjec
     return model, best_val_acc, best_epoch
 
 
-def fit(X_train_full, y_train_full, model_name, cfg: Config, subject_id=None, cropped_cfg=None):
+def fit(X_train_full, y_train_full, model_name, cfg: Config, subject_id=None, cropped_cfg=None, csp_init=False):
     """Trains a single model on already-loaded data, with early stopping.
 
     Splits the given training data into a single 80/20 train/validation
@@ -412,6 +423,8 @@ def fit(X_train_full, y_train_full, model_name, cfg: Config, subject_id=None, cr
     cropped_cfg : CroppedConfig, optional
         If given, enables crop-based training/validation -- see
         fit_on_split.
+    csp_init : bool
+        EEGNet only. See fit_on_split.
 
     Returns
     -------
@@ -426,7 +439,10 @@ def fit(X_train_full, y_train_full, model_name, cfg: Config, subject_id=None, cr
         X_train_full, y_train_full,
         test_size=0.2, stratify=y_train_full, random_state=cfg.train.seed,
     )
-    return fit_on_split(X_train, y_train, X_val, y_val, model_name, cfg, subject_id=subject_id, cropped_cfg=cropped_cfg)
+    return fit_on_split(
+        X_train, y_train, X_val, y_val, model_name, cfg,
+        subject_id=subject_id, cropped_cfg=cropped_cfg, csp_init=csp_init,
+    )
 
 
 def compute_matched_epochs(epoch_train_pairs, n_train_full, batch_size):
@@ -465,7 +481,7 @@ def compute_matched_epochs(epoch_train_pairs, n_train_full, batch_size):
     return max(1, round(mean_steps / steps_per_epoch_full))
 
 
-def fit_full(X, y, model_name, cfg: Config, n_epochs, subject_id=None, seed=None, cropped_cfg=None):
+def fit_full(X, y, model_name, cfg: Config, n_epochs, subject_id=None, seed=None, cropped_cfg=None, csp_init=False):
     """Trains a model on the full dataset for a fixed number of epochs,
     with no validation split and no early stopping.
 
@@ -492,6 +508,8 @@ def fit_full(X, y, model_name, cfg: Config, n_epochs, subject_id=None, seed=None
     cropped_cfg : CroppedConfig, optional
         If given, X/y are sliced into crops before training (the model is
         built with crop_size as its input length).
+    csp_init : bool
+        EEGNet only. See fit_on_split.
 
     Returns
     -------
@@ -519,6 +537,12 @@ def fit_full(X, y, model_name, cfg: Config, n_epochs, subject_id=None, seed=None
     model_cfg = getattr(cfg, model_name)
     model     = model_cls(N_CHANNELS, n_times, N_CLASSES, model_cfg).to(device)
 
+    if csp_init:
+        if model_name != "eegnet":
+            raise ValueError(f"csp_init is only supported for eegnet, got model_name={model_name!r}")
+        print(f"[{model_name}] {label}: initializing spatial_conv via per-band CSP")
+        csp_initialize(model, X_input, y_input, device)
+
     optimizer = torch.optim.Adam(model.parameters(), lr=model_cfg.lr, weight_decay=cfg.train.weight_decay)
     criterion = nn.CrossEntropyLoss()
 
@@ -539,7 +563,7 @@ def fit_full(X, y, model_name, cfg: Config, n_epochs, subject_id=None, seed=None
     return model
 
 
-def train_one_subject(subject_id, model_name, cfg: Config, n_folds=1, cropped_cfg=None):
+def train_one_subject(subject_id, model_name, cfg: Config, n_folds=1, cropped_cfg=None, csp_init=False):
     """Loads a subject's training data and fits model(s), saving checkpoints.
 
     Does not touch test data (session_E) -- this function only trains and
@@ -571,6 +595,8 @@ def train_one_subject(subject_id, model_name, cfg: Config, n_folds=1, cropped_cf
         If given, enables crop-based training/validation throughout (see
         fit_on_split) -- recorded in the returned manifest entry so
         evaluate.py knows to score these checkpoints via crop-averaging.
+    csp_init : bool
+        EEGNet only. See fit_on_split.
 
     Returns
     -------
@@ -594,7 +620,8 @@ def train_one_subject(subject_id, model_name, cfg: Config, n_folds=1, cropped_cf
 
     if n_folds == 1:
         model, best_val_acc, best_epoch = fit(
-            X_train_full, y_train_full, model_name, cfg, subject_id=subject_id, cropped_cfg=cropped_cfg
+            X_train_full, y_train_full, model_name, cfg, subject_id=subject_id,
+            cropped_cfg=cropped_cfg, csp_init=csp_init,
         )
 
         ckpt_path = OUTPUT_DIR / f"{model_name}_subject{subject_id}.pt"
@@ -609,7 +636,7 @@ def train_one_subject(subject_id, model_name, cfg: Config, n_folds=1, cropped_cf
         )
         final_model = fit_full(
             X_train_full, y_train_full, model_name, cfg, final_n_epochs,
-            subject_id=subject_id, cropped_cfg=cropped_cfg,
+            subject_id=subject_id, cropped_cfg=cropped_cfg, csp_init=csp_init,
         )
         final_ckpt_path = OUTPUT_DIR / f"{model_name}_subject{subject_id}_final.pt"
         torch.save(final_model.state_dict(), final_ckpt_path)
@@ -634,7 +661,8 @@ def train_one_subject(subject_id, model_name, cfg: Config, n_folds=1, cropped_cf
         model, val_acc, best_epoch = fit_on_split(
             X_train_full[train_idx], y_train_full[train_idx],
             X_train_full[val_idx], y_train_full[val_idx],
-            model_name, cfg, subject_id=subject_id, seed=base_seed + fold_idx, cropped_cfg=cropped_cfg,
+            model_name, cfg, subject_id=subject_id, seed=base_seed + fold_idx,
+            cropped_cfg=cropped_cfg, csp_init=csp_init,
         )
 
         ckpt_path = OUTPUT_DIR / f"{model_name}_subject{subject_id}_fold{fold_idx}.pt"
@@ -653,7 +681,7 @@ def train_one_subject(subject_id, model_name, cfg: Config, n_folds=1, cropped_cf
     final_n_epochs = compute_matched_epochs(epoch_train_pairs, n_train_full, cfg.train.batch_size)
     final_model = fit_full(
         X_train_full, y_train_full, model_name, cfg, final_n_epochs,
-        subject_id=subject_id, cropped_cfg=cropped_cfg,
+        subject_id=subject_id, cropped_cfg=cropped_cfg, csp_init=csp_init,
     )
     final_ckpt_path = OUTPUT_DIR / f"{model_name}_subject{subject_id}_final.pt"
     torch.save(final_model.state_dict(), final_ckpt_path)
@@ -669,7 +697,7 @@ def train_one_subject(subject_id, model_name, cfg: Config, n_folds=1, cropped_cf
     }
 
 
-def run_all_subjects(model_name, cfg: Config = None, n_folds=1, cropped_cfg=None):
+def run_all_subjects(model_name, cfg: Config = None, n_folds=1, cropped_cfg=None, csp_init=False):
     """Trains one model (or one per fold) per subject; writes a checkpoint
     manifest to disk.
 
@@ -685,6 +713,8 @@ def run_all_subjects(model_name, cfg: Config = None, n_folds=1, cropped_cfg=None
     cropped_cfg : CroppedConfig, optional
         If given, enables crop-based training/validation for every
         subject (see fit_on_split).
+    csp_init : bool
+        EEGNet only. See fit_on_split.
 
     Returns
     -------
@@ -695,11 +725,11 @@ def run_all_subjects(model_name, cfg: Config = None, n_folds=1, cropped_cfg=None
     cfg = cfg or Config()
     print(
         f"Training {model_name} for {len(SUBJECT_IDS)} subjects "
-        f"(n_folds={n_folds}, cropped={cropped_cfg is not None}, "
+        f"(n_folds={n_folds}, cropped={cropped_cfg is not None}, csp_init={csp_init}, "
         f"within-subject, official session_T/session_E split)"
     )
     results = [
-        train_one_subject(sid, model_name, cfg, n_folds=n_folds, cropped_cfg=cropped_cfg)
+        train_one_subject(sid, model_name, cfg, n_folds=n_folds, cropped_cfg=cropped_cfg, csp_init=csp_init)
         for sid in SUBJECT_IDS
     ]
 
@@ -724,7 +754,15 @@ if __name__ == "__main__":
         "--cropped", action="store_true",
         help="Enable crop-based training/validation (see CroppedConfig in config.py). Off by default.",
     )
+    parser.add_argument(
+        "--csp-init", action="store_true",
+        help="EEGNet only: initialize the depthwise spatial_conv via per-temporal-band CSP "
+             "(see csp_init.py) instead of random init. Off by default.",
+    )
     args = parser.parse_args()
 
+    if args.csp_init and args.model != "eegnet":
+        parser.error("--csp-init is only supported for the eegnet model")
+
     cropped_cfg = Config().cropped if args.cropped else None
-    run_all_subjects(args.model, n_folds=args.n_folds, cropped_cfg=cropped_cfg)
+    run_all_subjects(args.model, n_folds=args.n_folds, cropped_cfg=cropped_cfg, csp_init=args.csp_init)
