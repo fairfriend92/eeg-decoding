@@ -11,13 +11,14 @@ class-set) spatial filters that maximize variance ratio between classes.
 This module runs CSP separately on each of the f1 temporal-filter outputs
 (using the model's own, randomly-initialized-but-fixed temporal_conv as the
 band-pass bank) and writes the resulting filters into spatial_conv's weight
-as an initialization -- training then proceeds as usual via backprop, this
+as an initialization. Training then proceeds as usual via backprop; this
 only replaces the starting point.
 """
 
 import numpy as np
 import torch
 from mne.decoding import CSP
+from mne.utils import use_log_level
 
 
 def csp_initialize(model, X_train, y_train, device):
@@ -52,15 +53,17 @@ def csp_initialize(model, X_train, y_train, device):
         band_signals = model.temporal_conv(x).cpu().numpy()    # (n_trials, f1, n_channels, n_times)
 
     new_weight = np.zeros((out_channels, 1, n_channels, 1), dtype=np.float32)
-    for band in range(f1):
-        # verbose=False silences mne's own per-class covariance-estimation
-        # logging ("Estimating class=k covariance... Done."), which is
-        # otherwise printed at its default INFO level on every fit() call.
-        csp = CSP(n_components=d, reg="ledoit_wolf", log=False, norm_trace=False, verbose=False)
-        csp.fit(band_signals[:, band, :, :].astype(np.float64), y_train)
-        filters = csp.filters_[:d]                              # (d, n_channels)
-        filters = filters / (np.linalg.norm(filters, axis=1, keepdims=True) + 1e-8)
-        new_weight[band * d:(band + 1) * d, 0, :, 0] = filters
+    # CSP's constructor no longer takes a verbose kwarg (removed upstream);
+    # this scoped context manager silences its per-fit covariance-estimation
+    # logging ("Estimating class=k covariance... Done.", otherwise printed
+    # at mne's default INFO level) without changing global mne log level.
+    with use_log_level(False):
+        for band in range(f1):
+            csp = CSP(n_components=d, reg="ledoit_wolf", log=False, norm_trace=False)
+            csp.fit(band_signals[:, band, :, :].astype(np.float64), y_train)
+            filters = csp.filters_[:d]                              # (d, n_channels)
+            filters = filters / (np.linalg.norm(filters, axis=1, keepdims=True) + 1e-8)
+            new_weight[band * d:(band + 1) * d, 0, :, 0] = filters
 
     model.spatial_conv[0].weight.data.copy_(torch.tensor(new_weight, device=device))
     return model

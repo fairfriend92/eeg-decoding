@@ -1,23 +1,43 @@
-"""Hyperparameters and paths shared across data loading, training, and evaluation."""
+"""Hyperparameters and paths shared across data loading, training, and evaluation.
 
+Dataset identity (class count, channel count, sampling rate, subject list,
+session-split strategy) lives on DataConfig and is chosen via a dataset
+preset in datasets.py (see make_config below) rather than hardcoded here --
+this module only defines the schema and default values.
+"""
+
+import copy
 from dataclasses import dataclass, field
 from pathlib import Path
+
+import yaml
 
 REPO_ROOT   = Path(__file__).resolve().parent.parent
 DATA_DIR    = REPO_ROOT / "data"
 OUTPUT_DIR  = REPO_ROOT / "output"
 
-N_CLASSES   = 4    # left hand, right hand, feet, tongue
-N_CHANNELS  = 22    # EEG electrodes, BCI-IV-2a montage
-SUBJECT_IDS = list(range(1, 10))    # 9 subjects
-
 
 @dataclass
 class DataConfig:
-    """Parameters for loading and epoching BCI-IV-2a via MOABB/MNE.
+    """Parameters for loading and epoching an EEG dataset via MOABB/MNE.
+
+    Fields fall into two groups: dataset identity (dataset, n_classes,
+    n_channels, subject_ids, split_strategy and its strategy-specific
+    fields) which come from a preset in datasets.DATASET_PRESETS and
+    normally should not be hand-edited per run, and signal-processing
+    knobs (l_freq..resample_freq) which are reasonable to override via a
+    CLI --set flag or config file for a given run.
 
     Parameters
     ----------
+    dataset : str
+        Dataset name, matching a key in datasets.MOABB_DATASET_CLASSES.
+    n_classes : int
+        Number of classes the paradigm should decode.
+    n_channels : int
+        Number of EEG channels the dataset provides (fixes model input shape).
+    subject_ids : list of int
+        Subject identifiers to iterate over for this dataset.
     l_freq : float
         Bandpass filter low cutoff, in Hz.
     h_freq : float
@@ -27,20 +47,45 @@ class DataConfig:
     tmax : float
         Epoch end time relative to cue onset, in seconds.
     resample_freq : float
-        Target sampling rate after resampling, in Hz.
-    train_session : str
-        Session label used as the training set (official competition split).
-    test_session : str
-        Session label used as the test set (official competition split).
+        Target sampling rate after resampling, in Hz. Kept at a common
+        value (250 Hz) across datasets by default for cross-dataset
+        hyperparameter comparability; CroppedConfig's sample counts are
+        derived from this at config-build time (see make_cropped_config),
+        so changing it does not silently desync crop sizing.
+    split_strategy : str
+        One of "fixed_sessions" (two explicitly named sessions, used by
+        BCI2a), "session_index" (train on the first n_train_sessions
+        sessions, test on the rest, used by Stieger2021 to match
+        cross-session decoding), or "within_session_holdout"
+        (single-session datasets with no second session to hold out, used
+        by Dreyer2023; splits a trailing, per-class-stratified fraction of
+        trials instead).
+    train_session, test_session : str, optional
+        Session labels used by the "fixed_sessions" strategy.
+    n_train_sessions : int, optional
+        Number of earliest sessions used for training by the
+        "session_index" strategy; the rest are held out for testing.
+    holdout_fraction : float, optional
+        Fraction of each class's trailing trials held out by the
+        "within_session_holdout" strategy.
     """
+
+    dataset: str = "bci2a"
+    n_classes: int = 4
+    n_channels: int = 22
+    subject_ids: list = field(default_factory=lambda: list(range(1, 10)))
 
     l_freq: float = 4.0
     h_freq: float = 38.0
     tmin: float = 0.0
     tmax: float = 4.0
     resample_freq: float = 250.0
+
+    split_strategy: str = "fixed_sessions"
     train_session: str = "0train"
     test_session: str = "1test"
+    n_train_sessions: int = None
+    holdout_fraction: float = None
 
 
 @dataclass
@@ -51,16 +96,19 @@ class CroppedConfig:
     trials are sliced into overlapping crops as extra training examples,
     using crop_stride (coarser, to keep the crop-multiplied training set
     a manageable size). Validation/test trials are scored by cropping
-    with eval_crop_stride instead (denser -- evaluation is done far fewer
-    times than training, so a smoother, more accurate per-trial average
-    from more overlapping crops is cheap to afford) and averaging
-    predictions per trial.
+    with eval_crop_stride instead. It is denser because evaluation is done
+    far fewer times than training, so a smoother, more accurate per-trial
+    average from more overlapping crops is cheap to afford. Predictions
+    are then averaged per trial.
 
     crop_size must match between training and evaluation, since it fixes
     the model's input length; only the crop density (stride) may differ.
 
-    Defaults assume a 250 Hz, 4s (1000-sample) trial: crop_size=500 (2s).
-    Revisit these if DataConfig.resample_freq or tmax change.
+    Expressed in raw samples (not seconds) so that a checkpoint manifest's
+    recorded crop_size/crop_stride (see evaluate.py) is unambiguous without
+    also recording the sampling rate. Use make_cropped_config to build one
+    of these from durations in seconds, correctly scaled to a dataset's
+    resample_freq. See make_config, which does this automatically.
 
     Parameters
     ----------
@@ -76,6 +124,32 @@ class CroppedConfig:
     crop_size: int = 500
     crop_stride: int = 125
     eval_crop_stride: int = 125
+
+
+def make_cropped_config(resample_freq, crop_duration_s=2.0, crop_stride_s=0.5, eval_crop_stride_s=0.5):
+    """Builds a CroppedConfig sized correctly for a given sampling rate.
+
+    Durations in seconds are dataset-independent; the resulting sample
+    counts are not (500 samples means something different at 250 Hz than
+    at 512 Hz). Defaults reproduce this project's original BCI2a defaults
+    exactly at resample_freq=250.0 (500/125/125 samples).
+
+    Parameters
+    ----------
+    resample_freq : float
+        Sampling rate, in Hz, to scale the durations against.
+    crop_duration_s, crop_stride_s, eval_crop_stride_s : float
+        Crop length and strides, in seconds.
+
+    Returns
+    -------
+    CroppedConfig
+    """
+    return CroppedConfig(
+        crop_size=round(crop_duration_s * resample_freq),
+        crop_stride=round(crop_stride_s * resample_freq),
+        eval_crop_stride=round(eval_crop_stride_s * resample_freq),
+    )
 
 
 @dataclass
@@ -97,8 +171,8 @@ class ConformerConfig:
     dropout : float
         Dropout probability applied throughout the encoder and head.
     lr : float
-        Initial learning rate for Adam. Lower than EEGNet's -- selected via
-        hyperparameter sweep; the larger, less-biased architecture
+        Initial learning rate for Adam. Lower than EEGNet's, selected via
+        hyperparameter sweep. The larger, less-biased architecture
         overfits at higher learning rates on this dataset's size.
     """
 
@@ -132,7 +206,7 @@ class EEGNetConfig:
         learning rate; kept at the original paper's value.
     lr : float
         Initial learning rate for Adam. Confirmed near-optimal by
-        hyperparameter sweep -- a lower rate (3e-4) underperformed clearly.
+        hyperparameter sweep. A lower rate (3e-4) underperformed clearly.
     """
 
     f1: int = 8
@@ -147,7 +221,7 @@ class EEGNetConfig:
 class TrainConfig:
     """Parameters controlling the per-subject training loop.
 
-    Learning rate is not here -- it is model-specific (see EEGNetConfig,
+    Learning rate is not here. It is model-specific (see EEGNetConfig,
     ConformerConfig), since the two architectures were found to need
     different values.
 
@@ -184,3 +258,214 @@ class Config:
     eegnet:    EEGNetConfig     = field(default_factory=EEGNetConfig)
     train:     TrainConfig      = field(default_factory=TrainConfig)
     cropped:   CroppedConfig    = field(default_factory=CroppedConfig)
+
+
+def make_config(dataset="bci2a", model=None, overrides=None):
+    """Builds a Config for a chosen dataset, with optional field overrides.
+
+    This is the single entry point train.py/evaluate.py/sweep.py should use
+    to build their Config, instead of calling Config() directly, so that
+    dataset selection and CLI/file overrides are applied consistently
+    everywhere.
+
+    Parameters
+    ----------
+    dataset : str
+        Dataset name, matching a key in datasets.DATASET_PRESETS.
+    model : str, optional
+        "eegnet" or "conformer". Only used to resolve bare (non-dotted)
+        override keys against the right model sub-config. See
+        apply_overrides.
+    overrides : dict, optional
+        Field name (dotted, e.g. "train.lr", "data.n_train_sessions", or
+        bare, e.g. "lr") -> value. Values from a CLI --set flag arrive as
+        strings and are coerced to match the target field's current type;
+        values from a parsed YAML file arrive already typed.
+
+    Returns
+    -------
+    Config
+    """
+    # Local import: datasets.py imports DataConfig from this module, so a
+    # module-level import here would be circular.
+    from datasets import DATASET_PRESETS
+
+    if dataset not in DATASET_PRESETS:
+        raise ValueError(f"Unknown dataset '{dataset}'. Choices: {sorted(DATASET_PRESETS)}")
+
+    cfg      = Config()
+    cfg.data = copy.deepcopy(DATASET_PRESETS[dataset])
+    cfg.cropped = make_cropped_config(cfg.data.resample_freq)
+
+    if overrides:
+        cfg = apply_overrides(cfg, overrides, model_name=model)
+
+    return cfg
+
+
+def _coerce(raw, current_value):
+    """Coerces a raw string override value to match current_value's type.
+
+    Values already typed (e.g. from a parsed YAML file) pass through
+    unchanged. Only plain strings (e.g. from a CLI --set flag) are
+    coerced.
+    """
+    if not isinstance(raw, str) or isinstance(current_value, str):
+        return raw
+    if isinstance(current_value, bool):
+        return raw.lower() in ("1", "true", "yes")
+    if isinstance(current_value, int):
+        return int(raw)
+    if isinstance(current_value, float):
+        return float(raw)
+    return raw
+
+
+def apply_overrides(cfg: Config, overrides: dict, model_name: str = None) -> Config:
+    """Applies a dict of field overrides onto a Config, in place.
+
+    Parameters
+    ----------
+    cfg : Config
+        Config to mutate.
+    overrides : dict
+        Field name -> value. A dotted key ("section.field", e.g.
+        "data.n_train_sessions", "eegnet.dropout", "cropped.crop_size")
+        targets that section explicitly. A bare key (e.g. "lr") is
+        resolved against cfg.train first, then against the model_name
+        sub-config if given. This matches this project's original
+        sweep.py override behavior for train/model hyperparameters.
+    model_name : str, optional
+        "eegnet" or "conformer"; enables bare-key resolution against that
+        model's sub-config.
+
+    Returns
+    -------
+    Config
+        The same cfg instance, mutated.
+
+    Raises
+    ------
+    ValueError
+        If a key names an unknown section, or a field not present on the
+        resolved section.
+    """
+    for key, value in overrides.items():
+        if "." in key:
+            section, field_name = key.split(".", 1)
+            if not hasattr(cfg, section):
+                raise ValueError(f"Unknown config section '{section}' in override '{key}'")
+            target = getattr(cfg, section)
+        else:
+            field_name = key
+            if hasattr(cfg.train, field_name):
+                target = cfg.train
+            elif model_name is not None and hasattr(getattr(cfg, model_name), field_name):
+                target = getattr(cfg, model_name)
+            else:
+                raise ValueError(
+                    f"Unknown hyperparameter '{key}'. Use 'section.field' "
+                    "to target data/cropped/eegnet/conformer explicitly."
+                )
+
+        if not hasattr(target, field_name):
+            raise ValueError(f"Unknown field '{field_name}' for override '{key}'")
+
+        setattr(target, field_name, _coerce(value, getattr(target, field_name)))
+
+    return cfg
+
+
+def flatten_file_overrides(nested: dict) -> dict:
+    """Flattens a one-level-nested overrides dict (as loaded from YAML)
+    into the dotted-key form apply_overrides expects.
+
+    Parameters
+    ----------
+    nested : dict
+        E.g. {"train": {"lr": 0.001}, "eegnet": {"dropout": 0.3}}.
+
+    Returns
+    -------
+    dict
+        E.g. {"train.lr": 0.001, "eegnet.dropout": 0.3}. A top-level value
+        that is not itself a dict is passed through as a bare key.
+    """
+    flat = {}
+    for section, fields in nested.items():
+        if isinstance(fields, dict):
+            for field_name, value in fields.items():
+                flat[f"{section}.{field_name}"] = value
+        else:
+            flat[section] = fields
+    return flat
+
+
+def parse_cli_overrides(pairs) -> dict:
+    """Parses repeated --set key=value CLI arguments into an overrides dict.
+
+    Parameters
+    ----------
+    pairs : list of str, optional
+        Each element like "train.lr=0.001".
+
+    Returns
+    -------
+    dict
+    """
+    overrides = {}
+    for pair in pairs or []:
+        if "=" not in pair:
+            raise ValueError(f"--set expects key=value, got '{pair}'")
+        key, value = pair.split("=", 1)
+        overrides[key] = value
+    return overrides
+
+
+def add_dataset_cli_args(parser):
+    """Adds --dataset/--config/--set to an argparse parser.
+
+    Shared by train.py/evaluate.py/sweep.py so all three scripts expose the
+    same dataset-selection and override surface. See resolve_config to turn
+    the resulting args namespace into a Config.
+    """
+    parser.add_argument(
+        "--dataset", default="bci2a",
+        help="Dataset to use (default: bci2a). See datasets.DATASET_PRESETS for choices "
+             "(currently bci2a, dreyer2023, stieger2021; graz_brainhero is registered but "
+             "not yet released).",
+    )
+    parser.add_argument(
+        "--config", type=Path, default=None,
+        help="Optional YAML file of config overrides, nested by section, "
+             "e.g. 'train:\\n  lr: 0.001'. Applied before --set, so --set wins on conflicts.",
+    )
+    parser.add_argument(
+        "--set", dest="set_overrides", action="append", default=None, metavar="KEY=VALUE",
+        help="Override a single config field, e.g. --set train.lr=0.001 or "
+             "--set data.n_train_sessions=6. Repeatable.",
+    )
+
+
+def resolve_config(args, model=None) -> Config:
+    """Builds a Config from parsed CLI args (see add_dataset_cli_args).
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Must have .dataset, .config, .set_overrides attributes.
+    model : str, optional
+        Passed through to make_config for bare-key override resolution.
+
+    Returns
+    -------
+    Config
+    """
+    overrides = {}
+    if args.config is not None:
+        with open(args.config) as f:
+            file_overrides = yaml.safe_load(f) or {}
+        overrides.update(flatten_file_overrides(file_overrides))
+    overrides.update(parse_cli_overrides(args.set_overrides))
+
+    return make_config(dataset=args.dataset, model=model, overrides=overrides)

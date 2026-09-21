@@ -1,11 +1,19 @@
-"""Loading and preprocessing for BCI Competition IV, Dataset 2a, via MOABB.
+"""Loading and preprocessing for MOABB-backed EEG motor imagery datasets.
 
-Each subject's data is split using the dataset's official session labels
-(session_T for training, session_E for testing) rather than a random split,
-so results remain directly comparable to published baselines.
+Supports multiple datasets (see datasets.py's registry) through a common
+DataConfig. Which dataset, its class/channel/subject-list identity, and
+its session-split strategy are all data-driven rather than hardcoded here.
+Each dataset's split strategy is chosen to make the strongest available
+train/test separation for that dataset's structure: BCI2a and Stieger2021
+both use held-out sessions the model never sees during training (matching
+published baselines and the "predict a later session" competition task
+respectively); Dreyer2023 has only one session per subject, so it instead
+holds out a trailing, per-class-stratified fraction of that session's
+trials.
 """
 
 import os
+import re
 import warnings
 
 import moabb
@@ -21,10 +29,10 @@ warnings.filterwarnings(
 # backend, which has an unresolved stall on the manifest-transfer step.
 moabb.set_download_provider("upstream")
 
-from moabb.datasets import BNCI2014_001
 from moabb.paradigms import MotorImagery
 
 from config import DATA_DIR, DataConfig
+from datasets import MOABB_DATASET_CLASSES
 
 # Redirects MOABB's download location from its default (~/mne_data) into
 # this project's data/ directory, matching the raw-input-only convention.
@@ -38,9 +46,9 @@ def load_subject(subject_id, cfg: DataConfig):
     Parameters
     ----------
     subject_id : int
-        Subject identifier (1-9).
+        Subject identifier, valid for cfg.dataset.
     cfg : DataConfig
-        Filtering and epoching parameters.
+        Dataset identity, filtering, and epoching parameters.
 
     Returns
     -------
@@ -49,11 +57,11 @@ def load_subject(subject_id, cfg: DataConfig):
     y : ndarray, shape (n_trials,)
         Integer class labels.
     sessions : ndarray, shape (n_trials,)
-        Session label per trial ("session_T" or "session_E").
+        Session label per trial.
     """
-    dataset = BNCI2014_001()
+    dataset = MOABB_DATASET_CLASSES[cfg.dataset]()
     paradigm = MotorImagery(
-        n_classes=4,
+        n_classes=cfg.n_classes,
         fmin=cfg.l_freq,
         fmax=cfg.h_freq,
         tmin=cfg.tmin,
@@ -72,8 +80,82 @@ def load_subject(subject_id, cfg: DataConfig):
     return X, y, sessions
 
 
+def _session_sort_key(label):
+    """Sorts session labels chronologically where possible.
+
+    Extracts the first integer found in the label (e.g. "session_2" -> 2);
+    falls back to lexicographic order for labels with no digits, and
+    breaks ties on the original string so the sort is always well-defined.
+    """
+    match = re.search(r"\d+", str(label))
+    return (int(match.group()) if match else -1, str(label))
+
+
+def _split_fixed_sessions(X, y, sessions, cfg: DataConfig):
+    """Splits by two explicitly named sessions (e.g. BCI2a's "0train"/"1test")."""
+    train_mask = sessions == cfg.train_session
+    test_mask  = sessions == cfg.test_session
+
+    return X[train_mask], y[train_mask], X[test_mask], y[test_mask]
+
+
+def _split_by_session_index(X, y, sessions, cfg: DataConfig):
+    """Trains on the earliest cfg.n_train_sessions sessions, tests on the rest.
+
+    Sessions are sorted chronologically (see _session_sort_key) rather than
+    relying on label equality, since session labels/counts vary per subject
+    for datasets like Stieger2021.
+    """
+    unique_sessions = sorted(np.unique(sessions), key=_session_sort_key)
+
+    if cfg.n_train_sessions is None or not (0 < cfg.n_train_sessions < len(unique_sessions)):
+        raise ValueError(
+            f"split_strategy='session_index' requires 0 < n_train_sessions < "
+            f"n_available_sessions; got n_train_sessions={cfg.n_train_sessions}, "
+            f"n_available_sessions={len(unique_sessions)} ({unique_sessions})"
+        )
+
+    train_sessions = set(unique_sessions[:cfg.n_train_sessions])
+    test_sessions  = set(unique_sessions[cfg.n_train_sessions:])
+
+    train_mask = np.isin(sessions, list(train_sessions))
+    test_mask  = np.isin(sessions, list(test_sessions))
+
+    return X[train_mask], y[train_mask], X[test_mask], y[test_mask]
+
+
+def _split_within_session_holdout(X, y, sessions, cfg: DataConfig):
+    """Holds out a trailing, per-class fraction of a single session's trials.
+
+    Used when a dataset has no second session to hold out (e.g.
+    Dreyer2023). Trailing rather than random, so later-recorded trials
+    (more likely to reflect fatigue/adaptation than earlier ones) are what
+    gets evaluated on, rather than an i.i.d. shuffle across the whole
+    session. Stratified per class so the held-out set isn't dominated by
+    whichever class happened to be recorded last.
+    """
+    train_idx, test_idx = [], []
+    for label in np.unique(y):
+        class_idx = np.where(y == label)[0]
+        n_test    = round(len(class_idx) * cfg.holdout_fraction)
+        test_idx.extend(class_idx[len(class_idx) - n_test:])
+        train_idx.extend(class_idx[:len(class_idx) - n_test])
+
+    train_idx = np.sort(train_idx)
+    test_idx  = np.sort(test_idx)
+
+    return X[train_idx], y[train_idx], X[test_idx], y[test_idx]
+
+
+_SPLIT_STRATEGIES = {
+    "fixed_sessions":        _split_fixed_sessions,
+    "session_index":         _split_by_session_index,
+    "within_session_holdout": _split_within_session_holdout,
+}
+
+
 def split_subject(X, y, sessions, cfg: DataConfig):
-    """Splits a single subject's trials by official session.
+    """Splits a single subject's trials into train/test, per cfg.split_strategy.
 
     Parameters
     ----------
@@ -84,20 +166,22 @@ def split_subject(X, y, sessions, cfg: DataConfig):
     sessions : ndarray, shape (n_trials,)
         Session label per trial.
     cfg : DataConfig
-        Provides the train/test session labels.
+        Provides split_strategy and its strategy-specific fields.
 
     Returns
     -------
     X_train, y_train, X_test, y_test : ndarray
-        Trials partitioned by session, with no overlap.
+        Trials partitioned into train/test, with no overlap.
     """
-    train_mask = sessions == cfg.train_session
-    test_mask  = sessions == cfg.test_session
+    try:
+        split_fn = _SPLIT_STRATEGIES[cfg.split_strategy]
+    except KeyError:
+        raise ValueError(
+            f"Unknown split_strategy '{cfg.split_strategy}'. "
+            f"Choices: {sorted(_SPLIT_STRATEGIES)}"
+        ) from None
 
-    X_train, y_train = X[train_mask], y[train_mask]
-    X_test,  y_test  = X[test_mask],  y[test_mask]
-
-    return X_train, y_train, X_test, y_test
+    return split_fn(X, y, sessions, cfg)
 
 
 def normalize_subject(X_train, X_test, eps=1e-8):

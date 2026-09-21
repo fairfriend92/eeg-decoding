@@ -1,8 +1,11 @@
-"""Scores train.py's saved checkpoints on the held-out test set (session_E).
+"""Scores train.py's saved checkpoints on the held-out test set.
 
-Relies on config.py's model hyperparameters matching what was used at
-training time -- do not change config.py between running train.py and
-this script.
+Relies on cfg matching what was used at training time. Pass the same
+--dataset/--config/--set as the train.py run that produced the checkpoints
+being scored. Each manifest entry records which dataset it was trained on
+(see train.py); evaluate_subject asserts this matches cfg.data.dataset
+before scoring, so a mismatch is a hard error instead of silently wrong
+results.
 
 n_folds=1 checkpoints: reports test accuracy/kappa directly.
 n_folds>=2 checkpoints: reports fold-mean test accuracy/kappa (mean +/-
@@ -10,20 +13,21 @@ std across the fold models' individual scores) and ensemble test
 accuracy/kappa.
 
 Must be run with this file's own directory (src/) as the script's
-directory -- see train.py for why.
+directory. See train.py for why.
 """
 
 import argparse
 import json
 import statistics
+from types import SimpleNamespace
 
 import torch
 
-from config import N_CHANNELS, N_CLASSES, OUTPUT_DIR, Config, CroppedConfig
+from config import Config, add_dataset_cli_args, make_config, resolve_config
 from data_loader import get_subject_data
 from models.conformer import EEGConformer
 from models.eegnet import EEGNet
-from train import evaluate_arrays, evaluate_cropped, evaluate_ensemble, evaluate_ensemble_cropped
+from train import evaluate_arrays, evaluate_cropped, evaluate_ensemble, evaluate_ensemble_cropped, output_dir_for
 
 MODEL_REGISTRY = {
     "eegnet": EEGNet,
@@ -32,7 +36,7 @@ MODEL_REGISTRY = {
 
 
 def load_checkpoint(checkpoint_path, model_name, n_times, cfg: Config, device):
-    """Reconstructs a model from current config.py and loads saved weights.
+    """Reconstructs a model from cfg and loads saved weights.
 
     Parameters
     ----------
@@ -44,7 +48,7 @@ def load_checkpoint(checkpoint_path, model_name, n_times, cfg: Config, device):
         Number of time samples per epoch, needed to reconstruct the
         model's architecture.
     cfg : Config
-        Full project configuration -- must match what was used to train
+        Full project configuration. Must match what was used to train
         this checkpoint.
     device : torch.device
         Device to load the model onto.
@@ -56,7 +60,7 @@ def load_checkpoint(checkpoint_path, model_name, n_times, cfg: Config, device):
     """
     model_cls = MODEL_REGISTRY[model_name]
     model_cfg = getattr(cfg, model_name)
-    model     = model_cls(N_CHANNELS, n_times, N_CLASSES, model_cfg).to(device)
+    model     = model_cls(cfg.data.n_channels, n_times, cfg.data.n_classes, model_cfg).to(device)
     model.load_state_dict(torch.load(checkpoint_path, map_location=device))
     model.eval()
     return model
@@ -72,7 +76,7 @@ def evaluate_subject(entry, model_name, cfg: Config):
     model_name : str
         Either "eegnet" or "conformer".
     cfg : Config
-        Full project configuration -- must match what was used to train
+        Full project configuration. Must match what was used to train
         the checkpoint(s).
 
     Returns
@@ -86,14 +90,25 @@ def evaluate_subject(entry, model_name, cfg: Config):
     """
     device = torch.device(cfg.train.device if torch.cuda.is_available() else "cpu")
 
+    entry_dataset = entry.get("dataset")
+    if entry_dataset is not None and entry_dataset != cfg.data.dataset:
+        raise ValueError(
+            f"Checkpoint manifest entry for subject {entry['subject']} was trained on "
+            f"dataset '{entry_dataset}', but cfg.data.dataset is '{cfg.data.dataset}'. "
+            "Pass the matching --dataset (and any --config/--set used at train time)."
+        )
+
     subject_id = entry["subject"]
     _, _, X_test, y_test = get_subject_data(subject_id, cfg.data)
 
     cropped_entry = entry.get("cropped")
     if cropped_entry is not None:
-        cropped_cfg = CroppedConfig(
+        # Only crop_size and eval_crop_stride are actually consumed below
+        # (by load_checkpoint and evaluate_cropped/predict_probs_cropped
+        # respectively); a plain namespace is enough, no need to round-trip
+        # through the full CroppedConfig dataclass.
+        cropped_cfg = SimpleNamespace(
             crop_size=cropped_entry["crop_size"],
-            crop_stride=cropped_entry["crop_stride"],
             eval_crop_stride=cfg.cropped.eval_crop_stride,
         )
         model_n_times = cropped_cfg.crop_size
@@ -185,24 +200,25 @@ def evaluate_all(model_name, cfg: Config = None):
     model_name : str
         Either "eegnet" or "conformer".
     cfg : Config, optional
-        Full project configuration; defaults to `Config()`. Must match
-        what was used to train the checkpoints being loaded.
+        Full project configuration; defaults to `make_config()` (bci2a).
+        Must match what was used to train the checkpoints being loaded.
 
     Returns
     -------
     list of dict
         Per-subject evaluation results, in subject order.
     """
-    cfg = cfg or Config()
+    cfg = cfg or make_config()
+    dataset_output_dir = output_dir_for(cfg)
 
-    manifest_path = OUTPUT_DIR / f"{model_name}_checkpoints.json"
+    manifest_path = dataset_output_dir / f"{model_name}_checkpoints.json"
     with open(manifest_path) as f:
         manifest = json.load(f)
 
     results = [evaluate_subject(entry, model_name, cfg) for entry in manifest]
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    results_path = OUTPUT_DIR / f"{model_name}_results.json"
+    dataset_output_dir.mkdir(parents=True, exist_ok=True)
+    results_path = dataset_output_dir / f"{model_name}_results.json"
     with open(results_path, "w") as f:
         json.dump(results, f, indent=2)
 
@@ -267,13 +283,14 @@ def compare_models(model_names, cfg: Config = None):
     model_names : list of str
         Models to evaluate, e.g. ["eegnet", "conformer"].
     cfg : Config, optional
-        Full project configuration; defaults to `Config()`.
+        Full project configuration; defaults to `make_config()` (bci2a).
 
     Returns
     -------
     dict
         Model name mapped to its summary dict.
     """
+    cfg = cfg or make_config()
     summaries = {}
     for name in model_names:
         results = evaluate_all(name, cfg)
@@ -303,8 +320,9 @@ def compare_models(model_names, cfg: Config = None):
             f"{summary['final_kappa_std']:.3f}"
         )
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    summary_path = OUTPUT_DIR / "summary.json"
+    dataset_output_dir = output_dir_for(cfg)
+    dataset_output_dir.mkdir(parents=True, exist_ok=True)
+    summary_path = dataset_output_dir / "summary.json"
     with open(summary_path, "w") as f:
         json.dump(summaries, f, indent=2)
 
@@ -314,6 +332,9 @@ def compare_models(model_names, cfg: Config = None):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("models", nargs="+", choices=list(MODEL_REGISTRY.keys()))
+    add_dataset_cli_args(parser)
     args = parser.parse_args()
 
-    compare_models(args.models)
+    model_for_overrides = args.models[0] if len(args.models) == 1 else None
+    cfg = resolve_config(args, model=model_for_overrides)
+    compare_models(args.models, cfg=cfg)

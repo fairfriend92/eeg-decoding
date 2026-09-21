@@ -4,3 +4,4 @@ mne>=1.6
 numpy>=1.26
 scikit-learn>=1.4
 matplotlib>=3.8
+pyyaml>=6.0
