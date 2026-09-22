@@ -225,12 +225,22 @@ def evaluate_all(model_name, cfg: Config = None):
     return results
 
 
+def _stdev(data):
+    """Sample standard deviation (ddof=1), or 0.0 for a single data point.
+
+    statistics.stdev raises below two points; a lone subject's run has
+    no spread to report.
+    """
+    return statistics.stdev(data) if len(data) >= 2 else 0.0
+
+
 def summarize(results):
     """Aggregates per-subject results into summary statistics across subjects.
 
-    Standard deviation uses ddof=1 (sample std). Also aggregates the
-    full-data final-fit model's metrics (present for both n_folds=1 and
-    n_folds>=2 runs); for n_folds>=2, also aggregates the ensemble metrics.
+    Standard deviation uses ddof=1 (sample std), or 0.0 for a single
+    subject. Also aggregates the full-data final-fit model's metrics
+    (present for both n_folds=1 and n_folds>=2 runs); for n_folds>=2,
+    also aggregates the ensemble metrics.
 
     Parameters
     ----------
@@ -255,22 +265,22 @@ def summarize(results):
         "n_subjects":          len(results),
         "n_folds":             n_folds,
         "accuracy_mean":       statistics.mean(accuracies),
-        "accuracy_std":        statistics.stdev(accuracies),
+        "accuracy_std":        _stdev(accuracies),
         "kappa_mean":          statistics.mean(kappas),
-        "kappa_std":           statistics.stdev(kappas),
+        "kappa_std":           _stdev(kappas),
         "final_accuracy_mean": statistics.mean(final_accs),
-        "final_accuracy_std":  statistics.stdev(final_accs),
+        "final_accuracy_std":  _stdev(final_accs),
         "final_kappa_mean":    statistics.mean(final_kaps),
-        "final_kappa_std":     statistics.stdev(final_kaps),
+        "final_kappa_std":     _stdev(final_kaps),
     }
 
     if n_folds >= 2:
         ensemble_accs   = [r["ensemble_test_accuracy"] for r in results]
         ensemble_kappas = [r["ensemble_test_kappa"] for r in results]
         summary["ensemble_accuracy_mean"] = statistics.mean(ensemble_accs)
-        summary["ensemble_accuracy_std"]  = statistics.stdev(ensemble_accs)
+        summary["ensemble_accuracy_std"]  = _stdev(ensemble_accs)
         summary["ensemble_kappa_mean"]    = statistics.mean(ensemble_kappas)
-        summary["ensemble_kappa_std"]     = statistics.stdev(ensemble_kappas)
+        summary["ensemble_kappa_std"]     = _stdev(ensemble_kappas)
 
     return summary
 
