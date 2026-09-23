@@ -4,6 +4,7 @@
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COLAB="${REPO_ROOT}/.venv/bin/colab"
 REMOTE_ROOT="/content/eeg-decoding"
+DRIVE_ROOT="/content/drive/MyDrive/progetti/eeg-decoding"
 
 # Ensures a Colab session exists, creating one (with --gpu, if SESSION and
 # GPU are set in the caller's scope) when it does not. Sets SESSION_ARGS.
@@ -90,4 +91,13 @@ download_tree() {
         echo "download: ${remote_file} -> ${local_path}"
         "$COLAB" download "${SESSION_ARGS[@]}" "$remote_file" "$local_path"
     done <<< "$remote_files"
+}
+
+# Mounts Google Drive on the Colab VM via the CLI's own `drivemount`
+# command, which handles the OAuth consent flow itself. Not
+# google.colab.drive.mount() run through `colab exec` -- that needs a live
+# notebook UI for the consent prompt, which a headless `colab exec` call
+# doesn't have. Requires SESSION_ARGS to be set.
+mount_drive() {
+    "$COLAB" drivemount "${SESSION_ARGS[@]}"
 }

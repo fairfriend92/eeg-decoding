@@ -119,11 +119,16 @@ class EEGConformer(nn.Module):
         self.dropout    = nn.Dropout(cfg.dropout)
         self.classifier = nn.Linear(cfg.embed_dim, n_classes)
 
-    def forward(self, x):
+    def forward(self, x, channel_positions=None, ch_names=None):
         """
         Parameters
         ----------
         x : Tensor, shape (batch, n_channels, n_times)
+        channel_positions : Tensor, shape (batch, n_channels, 3), optional
+            Unused. Accepted for compatibility with NeuralBench's
+            check_forward contract (see scripts/neuralbench_eval.py).
+        ch_names : list of str, optional
+            Unused, same reason as channel_positions.
 
         Returns
         -------

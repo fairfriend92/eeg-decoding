@@ -74,13 +74,18 @@ class EEGNet(nn.Module):
         x = self.separable_conv(x)
         return x.flatten(start_dim=1)
 
-    def forward(self, x):
+    def forward(self, x, channel_positions=None, ch_names=None):
         """Runs the forward pass.
 
         Parameters
         ----------
         x : Tensor, shape (batch, n_channels, n_times)
             Batch of EEG epochs.
+        channel_positions : Tensor, shape (batch, n_channels, 3), optional
+            Unused. Accepted for compatibility with NeuralBench's
+            check_forward contract (see scripts/neuralbench_eval.py).
+        ch_names : list of str, optional
+            Unused, same reason as channel_positions.
 
         Returns
         -------
