@@ -1,4 +1,4 @@
-"""Hyperparameter sweep for EEGNet and EEG Conformer.
+"""Hyperparameter sweep for EEGNet and PatchTransformer and Conformer.
 
 Selects by mean validation accuracy across subjects; never touches test
 data. Each subject's data is loaded once and reused across every
@@ -18,7 +18,8 @@ Default search grids, applied on top of the chosen dataset's Config
 (see --dataset/--config/--set, and config.make_config):
 
     eegnet:    lr in {1e-3, 3e-4}, dropout in {0.25, 0.5}
-    conformer: lr in {1e-3, 3e-4}, dropout in {0.3, 0.5}
+    patch_transformer: lr in {1e-3, 3e-4}, dropout in {0.3, 0.5}
+    conformer: lr in {5e-4, 2e-4}, dropout in {0.3, 0.5}
 
 Each grid is 4 configs x n_subjects x n_folds short, early-stopped
 training runs (e.g. 180 runs for BCI2a's 9 subjects at the n_folds=5
@@ -41,8 +42,12 @@ DEFAULT_GRIDS = {
         "lr":      [1e-3, 3e-4],
         "dropout": [0.25, 0.5],
     },
-    "conformer": {
+    "patch_transformer": {
         "lr":      [1e-3, 3e-4],
+        "dropout": [0.3, 0.5],
+    },
+    "conformer": {
+        "lr":      [5e-4, 2e-4],
         "dropout": [0.3, 0.5],
     },
 }
@@ -74,7 +79,7 @@ def build_config(base_cfg, model_name, overrides):
         The dataset-selected Config to start from (see make_config);
         deep-copied so each combo's overrides don't leak into the next.
     model_name : str
-        Either "eegnet" or "conformer".
+        One of "eegnet", "patch_transformer", "conformer".
     overrides : dict
         Field name -> value. A bare field name is resolved against
         train/model_name. See config.apply_overrides.
@@ -97,7 +102,7 @@ def evaluate_subject(X, y, model_name, cfg: Config, n_folds, subject_id=None):
     X, y : ndarray
         A subject's full training-session trials and labels.
     model_name : str
-        Either "eegnet" or "conformer".
+        One of "eegnet", "patch_transformer", "conformer".
     cfg : Config
         Full project configuration.
     n_folds : int
@@ -138,7 +143,7 @@ def run_sweep(model_name, base_cfg=None, grid=None, subjects=None, n_folds=5):
     Parameters
     ----------
     model_name : str
-        Either "eegnet" or "conformer".
+        One of "eegnet", "patch_transformer", "conformer".
     base_cfg : Config, optional
         Dataset-selected Config each combo's overrides are applied on top
         of (see make_config); defaults to `make_config()` (bci2a).

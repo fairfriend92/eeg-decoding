@@ -12,12 +12,18 @@ holds out a trailing, per-class-stratified fraction of that session's
 trials.
 """
 
+import logging
 import os
 import re
+import time
 import warnings
 
 import moabb
+import moabb.datasets.download as moabb_download
+import moabb.datasets.dreyer2023 as moabb_dreyer2023
 import numpy as np
+import pooch
+import requests
 
 warnings.filterwarnings(
     "ignore",
@@ -38,6 +44,57 @@ from datasets import MOABB_DATASET_CLASSES
 # this project's data/ directory, matching the raw-input-only convention.
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 os.environ.setdefault("MNE_DATA", str(DATA_DIR))
+
+
+MAX_DOWNLOAD_ATTEMPTS = 10
+
+
+def configure_downloads():
+    """Configures MOABB's dataset downloads: verified HTTPS, no rate limit, retries, quiet log.
+
+    Applied once at import. Idempotent.
+    """
+    # Pooch logs the SHA256 of every file fetched without a known hash.
+    pooch.get_logger().setLevel(logging.WARNING)
+
+    # OSF's direct file API returns HTTP 429 after a few requests. The
+    # osf.io/download redirect serves the same files without that limit.
+    moabb_dreyer2023._api_base_url = "https://osf.io/download/"
+
+    original_choose_downloader = getattr(moabb_download, "_original_choose_downloader", moabb_download.choose_downloader)
+    original_retrieve = getattr(moabb_download, "_original_retrieve", moabb_download.retrieve)
+
+    def verified_choose_downloader(*args, **kwargs):
+        downloader = original_choose_downloader(*args, **kwargs)
+        if hasattr(downloader, "kwargs"):
+            # MOABB defaults to verify=False, which makes every request warn.
+            downloader.kwargs["verify"] = True
+            # The default 30 s read timeout is too short for OSF's redirect.
+            downloader.kwargs["timeout"] = 120
+        return downloader
+
+    def retrying_retrieve(*args, **kwargs):
+        for attempt in range(1, MAX_DOWNLOAD_ATTEMPTS + 1):
+            try:
+                return original_retrieve(*args, **kwargs)
+            except requests.exceptions.RequestException as e:
+                if attempt == MAX_DOWNLOAD_ATTEMPTS:
+                    raise
+                # A rate limit needs a long cooldown. A timeout or reset usually clears at once.
+                cooldown_s = 300 if "429" in str(e) else 30
+                print(
+                    f"[download] {type(e).__name__}, retry {attempt}/{MAX_DOWNLOAD_ATTEMPTS} "
+                    f"in {cooldown_s}s", flush=True,
+                )
+                time.sleep(cooldown_s)
+
+    moabb_download._original_choose_downloader = original_choose_downloader
+    moabb_download._original_retrieve = original_retrieve
+    moabb_download.choose_downloader = verified_choose_downloader
+    moabb_download.retrieve = retrying_retrieve
+
+
+configure_downloads()
 
 
 def load_subject(subject_id, cfg: DataConfig):

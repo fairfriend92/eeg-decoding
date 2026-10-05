@@ -14,9 +14,13 @@ project's plan notes. graz_brainhero is not yet released; its entry
 exists so it already appears as a --dataset choice and its preset can be
 filled in without touching any other file once real data/class ids are
 known.
+
+scherer2015's train_session/test_session values ("0"/"1") are confirmed
+against real downloaded data: a live run loaded both sessions for all 9
+subjects with no split error.
 """
 
-from moabb.datasets import BNCI2014_001, Dreyer2023, Stieger2021
+from moabb.datasets import BNCI2014_001, BNCI2015_004, Dreyer2023, Stieger2021
 
 from config import DataConfig
 
@@ -34,6 +38,7 @@ MOABB_DATASET_CLASSES = {
     "bci2a":          BNCI2014_001,
     "dreyer2023":     Dreyer2023,
     "stieger2021":    Stieger2021,
+    "scherer2015":    BNCI2015_004,
     "graz_brainhero": _graz_brainhero_not_released,
 }
 
@@ -66,6 +71,16 @@ DATASET_PRESETS = {
         resample_freq=250.0,
         split_strategy="session_index",
         n_train_sessions=8,
+    ),
+    "scherer2015": DataConfig(
+        dataset="scherer2015",
+        n_classes=5,
+        n_channels=30,
+        subject_ids=list(range(1, 10)),
+        resample_freq=250.0,
+        split_strategy="fixed_sessions",
+        train_session="0",    # unverified placeholder, see module docstring
+        test_session="1",     # unverified placeholder, see module docstring
     ),
     "graz_brainhero": DataConfig(
         dataset="graz_brainhero",

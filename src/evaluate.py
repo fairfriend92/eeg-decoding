@@ -26,11 +26,13 @@ import torch
 from config import Config, add_dataset_cli_args, make_config, resolve_config
 from data_loader import get_subject_data
 from models.conformer import EEGConformer
+from models.patch_transformer import PatchTransformer
 from models.eegnet import EEGNet
 from train import evaluate_arrays, evaluate_cropped, evaluate_ensemble, evaluate_ensemble_cropped, output_dir_for
 
 MODEL_REGISTRY = {
     "eegnet": EEGNet,
+    "patch_transformer": PatchTransformer,
     "conformer": EEGConformer,
 }
 
@@ -43,7 +45,7 @@ def load_checkpoint(checkpoint_path, model_name, n_times, cfg: Config, device):
     checkpoint_path : str
         Path to a .pt file written by train.py.
     model_name : str
-        Either "eegnet" or "conformer".
+        One of "eegnet", "patch_transformer", "conformer".
     n_times : int
         Number of time samples per epoch, needed to reconstruct the
         model's architecture.
@@ -74,7 +76,7 @@ def evaluate_subject(entry, model_name, cfg: Config):
     entry : dict
         One entry from output/{model}_checkpoints.json.
     model_name : str
-        Either "eegnet" or "conformer".
+        One of "eegnet", "patch_transformer", "conformer".
     cfg : Config
         Full project configuration. Must match what was used to train
         the checkpoint(s).
@@ -198,7 +200,7 @@ def evaluate_all(model_name, cfg: Config = None):
     Parameters
     ----------
     model_name : str
-        Either "eegnet" or "conformer".
+        One of "eegnet", "patch_transformer", "conformer".
     cfg : Config, optional
         Full project configuration; defaults to `make_config()` (bci2a).
         Must match what was used to train the checkpoints being loaded.
@@ -291,7 +293,7 @@ def compare_models(model_names, cfg: Config = None):
     Parameters
     ----------
     model_names : list of str
-        Models to evaluate, e.g. ["eegnet", "conformer"].
+        Models to evaluate, e.g. ["eegnet", "patch_transformer"].
     cfg : Config, optional
         Full project configuration; defaults to `make_config()` (bci2a).
 

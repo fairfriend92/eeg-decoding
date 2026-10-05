@@ -4,11 +4,16 @@
 # requirements.txt unless --skip-sync, and downloads output/ back when
 # done (updated *_results.json and summary.json).
 #
+# MOABB's own dataset downloads are redirected to DRIVE_DATA_DIR (see
+# _colab_common.sh), not the VM-local data/ dir: a dataset downloaded by
+# one session is immediately durable and reused by any later session, with
+# no separate sync step.
+#
 # Usage:
-#   scripts/colab_evaluate.sh [-s SESSION] [--gpu TYPE] [--skip-sync] -- {eegnet,conformer} [...]
+#   scripts/colab_evaluate.sh [-s SESSION] [--gpu TYPE] [--skip-sync] -- {eegnet,patch_transformer,conformer} [...]
 #
 # Examples:
-#   scripts/colab_evaluate.sh -s trainer -- eegnet conformer
+#   scripts/colab_evaluate.sh -s trainer -- eegnet patch_transformer
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/_colab_common.sh"
 
@@ -30,15 +35,17 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ "${#EVAL_ARGS[@]}" -eq 0 ]]; then
-    echo "Usage: $0 [-s SESSION] [--gpu TYPE] [--skip-sync] -- {eegnet,conformer} [...]" >&2
+    echo "Usage: $0 [-s SESSION] [--gpu TYPE] [--skip-sync] -- {eegnet,patch_transformer,conformer} [...]" >&2
     exit 1
 fi
 
 ensure_session
+mount_drive
 
 if [[ "$SKIP_SYNC" -eq 0 ]]; then
     echo "== syncing src/ =="
     upload_tree "${REPO_ROOT}/src" "src"
+    upload_tree "${REPO_ROOT}/configs" "configs"
 
     echo "== syncing output/ (checkpoints) =="
     upload_tree "${REPO_ROOT}/output" "output"
@@ -48,16 +55,21 @@ if [[ "$SKIP_SYNC" -eq 0 ]]; then
 fi
 
 # See colab_train.sh for why this bootstrap (including the sys.modules
-# eviction loop) is needed.
+# eviction loop) is needed. The MNE_DATA override must run before src/ is
+# imported: data_loader.py only sets it via os.environ.setdefault, which
+# is a no-op once it is already set.
 SCRATCH="$(mktemp -d)"
 trap 'rm -rf "$SCRATCH"' EXIT
 BOOTSTRAP="${SCRATCH}/bootstrap.py"
-python3 - "$REMOTE_ROOT" "${EVAL_ARGS[@]}" > "$BOOTSTRAP" <<'PYEOF'
+python3 - "$REMOTE_ROOT" "$DRIVE_DATA_DIR" "${EVAL_ARGS[@]}" > "$BOOTSTRAP" <<'PYEOF'
 import sys, json
 remote_root = sys.argv[1]
 remote_src = remote_root + '/src'
-eval_args = sys.argv[2:]
+drive_data_dir = sys.argv[2]
+eval_args = sys.argv[3:]
 print("import sys, os")
+print(f"os.makedirs({drive_data_dir!r}, exist_ok=True)")
+print(f"os.environ['MNE_DATA'] = {drive_data_dir!r}")
 print(f"sys.path.insert(0, {remote_src!r})")
 print(f"os.chdir({remote_src!r})")
 print(
@@ -71,7 +83,7 @@ print("exec(compile(open('evaluate.py').read(), 'evaluate.py', 'exec'))")
 PYEOF
 
 echo "== running evaluate.py ${EVAL_ARGS[*]:-} =="
-"$COLAB" exec "${SESSION_ARGS[@]}" -f "$BOOTSTRAP" --timeout 3600
+"$COLAB" exec "${SESSION_ARGS[@]}" -f "$BOOTSTRAP" --timeout 86400
 
 echo "== downloading output/ =="
 download_tree "output"

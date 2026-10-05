@@ -15,6 +15,7 @@ import yaml
 REPO_ROOT   = Path(__file__).resolve().parent.parent
 DATA_DIR    = REPO_ROOT / "data"
 OUTPUT_DIR  = REPO_ROOT / "output"
+CONFIGS_DIR = REPO_ROOT / "configs"
 
 
 @dataclass
@@ -154,7 +155,52 @@ def make_cropped_config(resample_freq, crop_duration_s=2.0, crop_stride_s=0.5, e
 
 @dataclass
 class ConformerConfig:
-    """Architecture and optimization parameters for the transformer encoder.
+    """Architecture and optimization parameters for the EEG Conformer.
+
+    Defaults follow the original paper's BCI Competition IV 2a setup at
+    250 Hz, with sample counts scaled by sampling rate like EEGNetConfig's
+    kernel_length.
+
+    Parameters
+    ----------
+    n_filters : int
+        Number of temporal and spatial convolution filters.
+    kernel_length : int
+        Length of the temporal convolution kernel, in samples.
+    pool_size : int
+        Average pooling window after the convolutions, in samples. Sets
+        each token's temporal extent.
+    pool_stride : int
+        Average pooling stride, in samples. Sets the token spacing.
+    embed_dim : int
+        Token embedding dimension after the 1x1 projection.
+    n_heads : int
+        Number of attention heads per encoder block. Must divide embed_dim.
+    n_layers : int
+        Number of stacked transformer encoder blocks.
+    ff_expansion : int
+        Feed-forward hidden size as a multiple of embed_dim.
+    dropout : float
+        Dropout probability in the convolution module and the encoder.
+    lr : float
+        Initial learning rate for Adam.
+    """
+
+    n_filters: int = 40
+    kernel_length: int = 25
+    pool_size: int = 75
+    pool_stride: int = 15
+    embed_dim: int = 40
+    n_heads: int = 10
+    n_layers: int = 6
+    ff_expansion: int = 4
+    dropout: float = 0.5
+    lr: float = 2e-4
+
+
+@dataclass
+class PatchTransformerConfig:
+    """Architecture and optimization parameters for the patch-token transformer.
 
     Parameters
     ----------
@@ -222,7 +268,7 @@ class TrainConfig:
     """Parameters controlling the per-subject training loop.
 
     Learning rate is not here. It is model-specific (see EEGNetConfig,
-    ConformerConfig), since the two architectures were found to need
+    PatchTransformerConfig, ConformerConfig), since the architectures need
     different values.
 
     Parameters
@@ -254,6 +300,7 @@ class Config:
     """Top-level configuration aggregating all sub-configs."""
 
     data:      DataConfig       = field(default_factory=DataConfig)
+    patch_transformer: PatchTransformerConfig = field(default_factory=PatchTransformerConfig)
     conformer: ConformerConfig  = field(default_factory=ConformerConfig)
     eegnet:    EEGNetConfig     = field(default_factory=EEGNetConfig)
     train:     TrainConfig      = field(default_factory=TrainConfig)
@@ -273,7 +320,7 @@ def make_config(dataset="bci2a", model=None, overrides=None):
     dataset : str
         Dataset name, matching a key in datasets.DATASET_PRESETS.
     model : str, optional
-        "eegnet" or "conformer". Only used to resolve bare (non-dotted)
+        "eegnet", "patch_transformer", or "conformer". Only used to resolve bare (non-dotted)
         override keys against the right model sub-config. See
         apply_overrides.
     overrides : dict, optional
@@ -336,7 +383,7 @@ def apply_overrides(cfg: Config, overrides: dict, model_name: str = None) -> Con
         sub-config if given. This matches this project's original
         sweep.py override behavior for train/model hyperparameters.
     model_name : str, optional
-        "eegnet" or "conformer"; enables bare-key resolution against that
+        "eegnet", "patch_transformer", or "conformer"; enables bare-key resolution against that
         model's sub-config.
 
     Returns
@@ -365,7 +412,7 @@ def apply_overrides(cfg: Config, overrides: dict, model_name: str = None) -> Con
             else:
                 raise ValueError(
                     f"Unknown hyperparameter '{key}'. Use 'section.field' "
-                    "to target data/cropped/eegnet/conformer explicitly."
+                    "to target data/cropped/eegnet/patch_transformer/conformer explicitly."
                 )
 
         if not hasattr(target, field_name):
@@ -432,13 +479,15 @@ def add_dataset_cli_args(parser):
     parser.add_argument(
         "--dataset", default="bci2a",
         help="Dataset to use (default: bci2a). See datasets.DATASET_PRESETS for choices "
-             "(currently bci2a, dreyer2023, stieger2021; graz_brainhero is registered but "
-             "not yet released).",
+             "(currently bci2a, dreyer2023, stieger2021, scherer2015; graz_brainhero is "
+             "registered but not yet released).",
     )
     parser.add_argument(
         "--config", type=Path, default=None,
         help="Optional YAML file of config overrides, nested by section, "
-             "e.g. 'train:\\n  lr: 0.001'. Applied before --set, so --set wins on conflicts.",
+             "e.g. 'train:\\n  lr: 0.001'. Applied before --set, so --set wins on conflicts. "
+             "A bare filename (e.g. 'ten_subjects.yaml') is looked up in configs/ if it "
+             "doesn't resolve relative to the current directory.",
     )
     parser.add_argument(
         "--set", dest="set_overrides", action="append", default=None, metavar="KEY=VALUE",
@@ -463,7 +512,8 @@ def resolve_config(args, model=None) -> Config:
     """
     overrides = {}
     if args.config is not None:
-        with open(args.config) as f:
+        config_path = args.config if args.config.exists() else CONFIGS_DIR / args.config
+        with open(config_path) as f:
             file_overrides = yaml.safe_load(f) or {}
         overrides.update(flatten_file_overrides(file_overrides))
     overrides.update(parse_cli_overrides(args.set_overrides))

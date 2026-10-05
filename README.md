@@ -1,22 +1,30 @@
-# EEG Motor Imagery Decoding with a Transformer Encoder
+# EEG Motor Imagery Decoding: EEGNet and EEG Conformer
 
-Motor imagery and related mental-task decoding across multiple EEG datasets:
-BCI Competition IV Dataset 2a [3], Dreyer 2023 [5], and Stieger 2021 [6]. A
-not-yet-released Graz+BrainHero dataset [7] is registered for future support.
-Compares a transformer encoder based on the EEG Conformer architecture [2]
-against EEGNet [1], a standard lightweight CNN baseline for this task.
+Motor imagery decoding across two public EEG datasets: BCI Competition IV
+Dataset 2a [3] and Dreyer 2023 [5]. Compares EEGNet [1], a standard lightweight
+CNN baseline for this task, against the EEG Conformer [2], a convolution module
+followed by a transformer encoder.
+
+EEGNet reaches 0.727 accuracy on all 87 Dreyer2023 subjects (2 classes, chance
+0.5) and 0.685 on BCI2a (4 classes, chance 0.25), within the range published
+for this architecture on BCI2a. The Conformer trails EEGNet on Dreyer2023 by
+0.061 ± 0.019 accuracy (final fit, paired per subject).
+
+This project's benchmark submission to the NeurIPS 2026 EEG/EMG Foundation
+Challenge is documented separately, in
+[README_NEURIPS2026.md](README_NEURIPS2026.md).
 
 ## Task
 
-Each dataset poses a different generalization shift (within-session, single-session
-holdout, or cross-session); see `datasets.py` for the exact preset (class count,
+Each dataset poses a different generalization shift (cross-session or
+within-session holdout); see `datasets.py` for the exact preset (class count,
 channel count, sampling rate, subject list, split strategy) backing each one below.
 
 ### BCI2a
 
 Subjects imagine a movement (left hand, right hand, feet, or tongue) without actually
 moving it; the task is decoding which one from EEG alone. 9 subjects, 22 channels,
-288 trials per subject split evenly across two recorded sessions (`0train`, `1test`),
+288 trials in each of two recorded sessions (`0train`, `1test`),
 recorded by the Institute for Knowledge Discovery (Laboratory of Brain-Computer
 Interfaces), Graz University of Technology, for BCI Competition IV [3]. Models are
 trained and evaluated per subject, using the dataset's original session split rather
@@ -31,23 +39,6 @@ online-feedback) [5]. With no second session to hold out, the split instead take
 trailing, per-class-stratified 20% of that session's trials as the test set (see
 `within_session_holdout` in `data_loader.py`).
 
-### Stieger2021
-
-4-class cursor-control BCI task (right hand, left hand, both hands, rest) via
-lateralized/total alpha-power modulation, 62 subjects, 60 channels at 1000 Hz native,
-up to 11 sessions per subject recorded over several weeks [6]. Trained on the
-earliest `n_train_sessions` (8 by default) and tested on the remaining, later
-sessions (`session_index` split). This is a genuine cross-session generalization
-test, unlike BCI2a's or Dreyer2023's single-day splits.
-
-### Graz+BrainHero (not yet released)
-
-Registered as a placeholder dataset (`graz_brainhero`, raises immediately if
-selected) for the NeurIPS 2026 EEG/EMG Foundation Challenge's Track 2 longitudinal
-corpus [7]: 3 cued mental commands (kinesthetic motor imagery, mental calculation,
-word association) across 6 sessions per participant, evaluating whether a model
-calibrated on early sessions still decodes reliably on later, unseen-day sessions.
-
 ## Results
 
 ![Results summary](output/figures/results_summary.png)
@@ -60,26 +51,42 @@ calibrated on early sessions still decodes reliably on later, unseen-day session
 | EEGNet, final-fit (100% of train session, cropped) | 0.632 ± 0.177 | 0.506 ± 0.224 |
 | EEGNet, ensemble (5-fold, cropped + CSP-init) | 0.685 ± 0.115 | 0.580 ± 0.154 |
 | EEGNet, final-fit (cropped + CSP-init) | 0.643 ± 0.119 | 0.524 ± 0.159 |
-| Conformer, ensemble (5-fold, cropped training) | 0.459 ± 0.160 | 0.278 ± 0.213 |
-| Conformer, final-fit (100% of train session, cropped) | 0.439 ± 0.139 | 0.253 ± 0.186 |
 
 Mean ± std across the 9 subjects (sample std). Both EEGNet numbers sit in the range
 reported for this exact architecture and dataset in the published literature [1]
-(roughly 63-72% accuracy, κ≈0.5-0.6).
+(roughly 63-72% accuracy, κ≈0.5-0.6). The Conformer comparison is on Dreyer2023.
+
+### Dreyer2023
+
+| | Accuracy | Kappa |
+|---|---|---|
+| EEGNet, best checkpoint (single 80/20 split) | 0.721 ± 0.164 | 0.443 ± 0.328 |
+| EEGNet, final-fit (100% of session, held-out tail excluded) | 0.727 ± 0.170 | 0.454 ± 0.339 |
+| Conformer, best checkpoint (single 80/20 split) | 0.688 ± 0.149 | 0.377 ± 0.299 |
+| Conformer, final-fit (100% of session, held-out tail excluded) | 0.666 ± 0.145 | 0.333 ± 0.290 |
+
+Mean ± std across all 87 subjects (sample std), default hyperparameters, no cropped
+training. The paired per-subject accuracy difference, EEGNet minus Conformer, is
++0.033 ± 0.020 for the best checkpoint (EEGNet ahead on 44 subjects, Conformer on
+37, 6 ties) and +0.061 ± 0.019 for the final fit (55, 26, 6), mean ± standard
+error. EEGNet leads on both, clearly for the final fit. With roughly 100 to 200
+training trials per subject, the Conformer's larger parameter count and weaker
+inductive bias for EEG do not pay off against EEGNet's compact design.
 
 ## Methodology
 
-- **Split**: session-based (official competition split), not random. Train/val
-  are drawn only from the training session; the test session is held out entirely
-  until final scoring, never touched during model or hyperparameter selection.
+- **Split**: BCI2a uses the official session split, Dreyer2023 a trailing,
+  per-class-stratified 20% holdout of its single session. Never a random split.
+  Train/val are drawn only from the training portion; the test portion is held out
+  entirely until final scoring, never touched during model or hyperparameter
+  selection.
 - **Preprocessing**: 4-38 Hz bandpass, resampled to 250 Hz, per-channel z-score
   normalization fit on the training session only.
 - **Validation**: single 80/20 split or stratified k-fold, selectable per run.
   Hyperparameters are selected via k-fold rather than a single split.
 - **Cropped training**: trials are sliced into overlapping windows as training
   augmentation, loosely following [4]; evaluation crops test trials the same way and
-  averages predictions per trial. This was the single largest lever tried, worth
-  roughly 6-9 accuracy points on its own.
+  averages predictions per trial.
 - **Reporting**: accuracy and Cohen's kappa, mean ± std across subjects, not a single
   headline number. For k-fold runs, three numbers are computed: the plain average of
   each fold model's own score, an ensemble score (averaging the fold models'
@@ -92,19 +99,26 @@ reported for this exact architecture and dataset in the published literature [1]
 ## Repository structure
 
 ```
-data/                 raw input only (MOABB/MNE cache)
-output/                checkpoints, results, figures, one subdirectory per dataset
+data/                   raw input only (MOABB/MNE cache)
+output/                 results and figures, one subdirectory per dataset
+  {dataset}/            manifests, results, and summary JSON
+    checkpoints/        .pt model checkpoints
 src/
-  config.py            hyperparameter dataclasses, Config-building/override logic
-  datasets.py            per-dataset presets (class/channel count, sampling rate,
+  config.py             hyperparameter dataclasses, Config-building/override logic
+  datasets.py           per-dataset presets (class/channel count, sampling rate,
                         subject list, session-split strategy) and MOABB dataset classes
-  data_loader.py        MOABB/MNE loading, train/test split, normalization, cropping
+  data_loader.py        MOABB/MNE loading, train/test split, normalization, cropping,
+                        download configuration (verified HTTPS, retries)
+  download_dataset.py   download-only fetch of a dataset's per-subject files
   models/
-    eegnet.py            CNN baseline
-    conformer.py          transformer encoder
-  train.py              trains and checkpoints; never touches test data
-  evaluate.py            scores saved checkpoints on the held-out test data
-  sweep.py               hyperparameter search, single-split or k-fold
+    eegnet.py             CNN baseline
+    conformer.py          EEG Conformer: convolution module plus transformer encoder
+  train.py                trains and checkpoints; never touches test data
+  evaluate.py             scores saved checkpoints on the held-out test data
+  sweep.py                hyperparameter search, single-split or k-fold
+  pretrain_trunk.py       shared-trunk pretraining (see README_NEURIPS2026.md)
+scripts/
+  make_results_figure.py  regenerates output/figures/results_summary.png
 ```
 
 `train.py` and `evaluate.py` are deliberately separate: training only ever produces
@@ -120,17 +134,14 @@ runtime (Colab or similar) is assumed for anything beyond a quick smoke test.
 
 All three scripts below accept the same dataset-selection flags:
 ```
---dataset {bci2a,dreyer2023,stieger2021,graz_brainhero}   (default: bci2a)
---config path/to/overrides.yaml                             (optional)
---set section.field=value                                    (repeatable, optional)
+--dataset {bci2a,dreyer2023}      (default: bci2a)
+--config path/to/overrides.yaml   (optional)
+--set section.field=value         (repeatable, optional)
 ```
 `--dataset` picks a preset from `datasets.py` (class count, channel count, sampling
 rate, subject list, session-split strategy). `bci2a` is the dataset used for the
-Results above; `dreyer2023`/`stieger2021` are implemented against MOABB's own dataset
-classes but not yet run end-to-end here (see Limitations). `graz_brainhero` is
-registered as a placeholder for the not-yet-released Graz+BrainHero dataset and
-raises immediately if selected. `--config` loads a YAML file of overrides, nested by
-section, e.g.:
+BCI2a Results above, and `dreyer2023` provides the Dreyer2023 Results.
+`--config` loads a YAML file of overrides, nested by section, e.g.:
 ```yaml
 train:
   lr: 0.001
@@ -157,7 +168,7 @@ it.
 
 Evaluate:
 ```
-python evaluate.py {eegnet,conformer} [{eegnet,conformer} ...] [dataset flags]
+python evaluate.py {eegnet,conformer} [...] [dataset flags]
 ```
 Loads the checkpoint manifest written by `train.py` for the selected `--dataset`,
 scores every checkpoint on the held-out test data, prints per-subject and aggregate
@@ -201,9 +212,18 @@ Creates the session if it does not already exist (`--gpu` accepts `T4`, `L4`, `G
 `H100`, `A100`, or is omitted for a CPU session), uploads `src/`, installs
 `requirements.txt`, runs `train.py` with everything after `--` forwarded as its
 arguments, and downloads `output/` back on completion. `data/` is not uploaded;
-`data_loader.py` downloads the dataset directly on the VM via MOABB. Pass
-`--skip-sync` to skip the upload and install steps on a session already set up
-this way.
+MOABB downloads into Drive, so a dataset fetched once is reused by every later
+session. `--script NAME` runs another `src/` entry point (e.g. `sweep.py`) instead
+of `train.py`. Pass `--skip-sync` to skip the upload and install steps on a
+session already set up this way.
+
+Download a dataset on a CPU-only session before a GPU run:
+```
+scripts/colab_download.sh -s downloader -- dreyer2023
+```
+Runs `download_dataset.py` without a GPU, so no accelerator sits idle during the
+transfer, and a failed download cannot abort a training run. Downloads retry on
+timeouts and rate limits.
 
 `scripts/colab_sync.sh -s trainer` uploads `src/` on its own; `--data` uploads the
 local `data/` cache instead.
@@ -234,23 +254,12 @@ Stop the session when done:
    with users' profile information for motor imagery brain-computer interface
    research," *Scientific Data*, vol. 10, p. 580, 2023.
    [DOI: 10.1038/s41597-023-02445-z](https://doi.org/10.1038/s41597-023-02445-z).
-6. J. R. Stieger, S. A. Engel, and B. He, "Continuous sensorimotor rhythm based
-   brain computer interface learning in a large population," *Scientific Data*,
-   vol. 8, p. 98, 2021.
-   [DOI: 10.1038/s41597-021-00883-1](https://doi.org/10.1038/s41597-021-00883-1).
-7. "EEG/EMG Foundation Challenge 2026," Brain and Body Workshop at NeurIPS 2026,
-   Track 2 (BCI decoding).
-   [Tracks & data](https://neural-interfaces26.github.io/tracks.html) ·
-   [rules & FAQ](https://neural-interfaces26.github.io/rules.html).
 
 ## Limitations
 
-Results above are for BCI2a only, within-subject (no cross-subject generalization
-claim), 9 subjects. `dreyer2023` and `stieger2021` support (see Usage) is implemented
-against MOABB's dataset classes and covered by unit-level checks on synthetic data,
-but not yet validated against the real downloaded data (Dreyer2023 ~19GB,
-Stieger2021 ~399GB). In particular, MOABB's `MotorImagery` paradigm's class/event
-selection has not been hands-on confirmed for Stieger2021's `rest` class or
-Dreyer2023's 2-class-only event set. `stieger2021`'s `n_train_sessions=8` default
-session split is a provisional guess pending inspection of real per-subject session
-counts (documented as 7-11, not exactly 11 for everyone).
+The BCI2a results are within-subject only (no cross-subject generalization
+claim), 9 subjects. The Dreyer2023 results use a within-session holdout, so
+they measure generalization to later trials of the same session, not to a new
+day. Conformer hyperparameters are the original paper's defaults. A learning-rate
+and dropout grid on subjects 1-10 left validation accuracy within one point across
+all four settings.
