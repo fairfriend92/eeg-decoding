@@ -30,6 +30,9 @@ from models.conformer import EEGConformer
 from models.patch_transformer import PatchTransformer
 from models.eegnet import EEGNet
 
+# TF32 matmuls on Tensor Core GPUs.
+torch.set_float32_matmul_precision("high")
+
 MODEL_REGISTRY = {
     "eegnet": EEGNet,
     "patch_transformer": PatchTransformer,
@@ -257,12 +260,12 @@ def pretrain_joint_trunk(source_datasets, model_name, model_cfg, train_cfg, excl
     Raises
     ------
     ValueError
-        If fewer than 2 source datasets remain after exclude_dataset.
+        If no source dataset remains after exclude_dataset.
     """
     datasets_to_use = [name for name in source_datasets if name != exclude_dataset]
-    if len(datasets_to_use) < 2:
+    if len(datasets_to_use) < 1:
         raise ValueError(
-            f"pretrain_joint_trunk needs at least 2 source datasets after excluding "
+            f"pretrain_joint_trunk needs at least 1 source dataset after excluding "
             f"{exclude_dataset!r}, got {datasets_to_use}"
         )
 

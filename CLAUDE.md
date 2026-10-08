@@ -38,6 +38,16 @@ something, use `colab restart-kernel` or `colab stop` on the busy session
 directly. See
 [ANALYSIS_NOTES.md#colab-exec---timeout-is-a-client-side-ceiling-not-a-kernel-guard](docs/ANALYSIS_NOTES.md#colab-exec---timeout-is-a-client-side-ceiling-not-a-kernel-guard).
 
+## Colab sessions: every run gets a fresh session
+
+Create a new session for every training or evaluation run, and stop it when
+the run is done. Never reuse a session that has already run something. The
+same NeuralBench prepare pass took about 8 s per recording on a long-lived
+session and was much faster on a freshly created one, with no code change in
+between. If a run is unexpectedly slow, stop it, stop the session, and start
+over on a new one before investigating. See
+[ANALYSIS_NOTES.md#a-reused-colab-session-ran-the-same-prepare-pass-several-times-slower](docs/ANALYSIS_NOTES.md#a-reused-colab-session-ran-the-same-prepare-pass-several-times-slower).
+
 ## Don't open a terminal tab for a command that doesn't need one
 
 `mcp__terminal__run_in_terminal` always opens a brand new tab, with no way

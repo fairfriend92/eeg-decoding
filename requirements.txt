@@ -5,3 +5,4 @@ numpy>=1.26
 scikit-learn>=1.4
 matplotlib>=3.8
 pyyaml>=6.0
+pyriemann>=0.6

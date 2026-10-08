@@ -42,6 +42,9 @@ from models.patch_transformer import PatchTransformer
 from models.eegnet import EEGNet
 from pretrain_trunk import build_target_init_state
 
+# TF32 matmuls on Tensor Core GPUs. Also covers evaluate.py and sweep.py, which import this module.
+torch.set_float32_matmul_precision("high")
+
 MODEL_REGISTRY = {
     "eegnet": EEGNet,
     "patch_transformer": PatchTransformer,

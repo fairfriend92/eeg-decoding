@@ -32,6 +32,7 @@ after scripts/colab_neuralbench.sh uploads it alongside src/ on Colab.
 """
 
 import argparse
+import hashlib
 import subprocess
 import sys
 import threading
@@ -90,8 +91,11 @@ def _apply_pretrained_trunk(net, model_name, trunk_path):
 
 
 def _register_trunk_tag(module, pretrained_trunk_path):
-    """Registers a buffer encoding pretrained_trunk_path, so it participates
-    in neuralbench.external.model_digest.
+    """Registers a buffer holding the SHA-256 of the trunk file's bytes, so
+    the trunk's contents participate in neuralbench.external.model_digest.
+
+    Hashing contents, not the path, keeps two different checkpoints saved
+    at the same path from sharing one cached experiment.
 
     model_digest hashes str(model) + state_dict() before the lazy net is
     ever built (neuralbench's check_forward only inspects forward's
@@ -105,17 +109,16 @@ def _register_trunk_tag(module, pretrained_trunk_path):
     module : nn.Module
         The Lazy*Adapter instance being constructed.
     pretrained_trunk_path : Path or None
-        Value of the adapter's own pretrained_trunk_path argument.
+        Value of the adapter's own pretrained_trunk_path argument. The file
+        must exist when the adapter is constructed.
 
     Returns
     -------
     None
     """
     if pretrained_trunk_path is not None:
-        module.register_buffer(
-            "_trunk_tag",
-            torch.frombuffer(bytearray(str(pretrained_trunk_path).encode()), dtype=torch.uint8),
-        )
+        digest = hashlib.sha256(Path(pretrained_trunk_path).read_bytes()).digest()
+        module.register_buffer("_trunk_tag", torch.frombuffer(bytearray(digest), dtype=torch.uint8))
 
 
 class LazyEEGNetAdapter(nn.Module):
@@ -349,6 +352,11 @@ def _stage_moabb_data_locally(local_root=Path("/content/local_neuralbench_data")
     dict alone does not change it, so both are set here. A second call in
     the same process is a no-op.
 
+    Each dataset folder's top-level metadata files (manifest, README,
+    participants and channels tables) are copied along with the zips.
+    Without them moabb downloads each one again from OSF, over an
+    unverified connection and with no rate-limit protection.
+
     Parameters
     ----------
     local_root : Path
@@ -401,6 +409,12 @@ def _stage_moabb_data_locally(local_root=Path("/content/local_neuralbench_data")
             shutil.copy(zip_path, dst)
             with zipfile.ZipFile(dst) as zf:
                 zf.extractall(dst.parent)
+
+        for dataset_dir in {zip_path.parent for zip_path in drive_download_dir.rglob("*.zip")}:
+            local_dataset_dir = local_download_dir / dataset_dir.relative_to(drive_download_dir)
+            for meta_path in dataset_dir.iterdir():
+                if meta_path.is_file() and meta_path.suffix != ".zip":
+                    shutil.copy(meta_path, local_dataset_dir / meta_path.name)
 
     nb_config_manager._config["DATA_DIR"] = str(local_root)
     # Initialize first, or the lazy init would later overwrite DATA_DIR.
@@ -602,6 +616,8 @@ def main():
              "rebuild. Only valid for --model eegnet/patch_transformer/conformer.",
     )
     args = parser.parse_args()
+
+    torch.set_float32_matmul_precision("high")
 
     if args.download:
         returncode = _run_with_heartbeat(

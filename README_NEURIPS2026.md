@@ -35,8 +35,9 @@ early sessions still decodes reliably on later, unseen-day sessions.
 | REVE [3] (pretrained foundation model, 69.4M params) | 0.782 ± 0.013 | 0.858 ± 0.020 |
 | EEGNet, ours | 0.742 (1 seed) | 0.821 (1 seed) |
 | Patch transformer, ours (0.31M params) | 0.735 ± 0.007 | 0.810 ± 0.012 |
+| EEG Conformer [2], ours (0.44M params) | 0.716 ± 0.014 | 0.789 ± 0.019 |
 
-REVE and the patch transformer report mean ± std across 3 seeds (sample std);
+REVE, the patch transformer, and the EEG Conformer report mean ± std across 3 seeds (sample std);
 EEGNet reports a single seed (33). REVE outperforms this project's own
 architectures by roughly 4-5 balanced accuracy points. EEGNet matches the patch
 transformer within one point while using roughly an order of magnitude fewer
@@ -45,10 +46,10 @@ parameters.
 ## Methodology
 
 Evaluated through NeuralBench's own harness rather than this project's
-`evaluate.py`. REVE, the patch transformer, and EEGNet are all fine-tuned end-to-end
+`evaluate.py`. REVE, the patch transformer, the EEG Conformer, and EEGNet are all fine-tuned end-to-end
 (not linear-probed) on the same cross-subject Dreyer2023 split described
 above, up to 40 epochs, batch size 64, early stopping on validation
-balanced accuracy (patience 5). REVE's and the patch transformer's reported numbers are
+balanced accuracy (patience 5). REVE's, the patch transformer's, and the Conformer's reported numbers are
 mean ± std across 3 seeds; EEGNet's is a single seed (33).
 
 Warm-starting either model's shared trunk (`temporal_conv`/`separable_conv` for
@@ -161,8 +162,7 @@ a single seed, run once to validate the submission pipeline end to end
 rather than to produce a final number, so it is not yet directly
 comparable on variance. The Graz+BrainHero dataset is not yet released;
 its preset is registered but raises immediately if selected. The EEG Conformer
-[2] is registered for NeuralBench (`--model conformer`) but has no benchmark
-result and no Codabench submission file yet. Both
+[2] has no Codabench submission file yet. Both
 `scripts/submission/eegnet_submission.py` and `patch_transformer_submission.py`,
 plus the checkpoint-saving and packaging path behind them, have been
 verified end to end on Colab (real, non-debug runs, checkpoints packaged
