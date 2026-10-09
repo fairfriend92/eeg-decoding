@@ -107,8 +107,8 @@ src/
   config.py             hyperparameter dataclasses, Config-building/override logic
   datasets.py           per-dataset presets (class/channel count, sampling rate,
                         subject list, session-split strategy) and MOABB dataset classes
-  data_loader.py        MOABB/MNE loading, train/test split, normalization, cropping,
-                        download configuration (verified HTTPS, retries)
+  data_loader.py        MOABB/MNE loading, train/test split, normalization, cropping
+  moabb_downloads.py    MOABB download configuration (verified HTTPS, OSF redirect, retries)
   download_dataset.py   download-only fetch of a dataset's per-subject files
   models/
     eegnet.py             CNN baseline
@@ -225,8 +225,9 @@ Runs `download_dataset.py` without a GPU, so no accelerator sits idle during the
 transfer, and a failed download cannot abort a training run. Downloads retry on
 timeouts and rate limits.
 
-`scripts/colab_sync.sh -s trainer` uploads `src/` on its own; `--data` uploads the
-local `data/` cache instead.
+`scripts/colab_sync.sh -s trainer` uploads `src/` on its own; `--data` also uploads the
+local `data/` cache to the Drive data directory that the pipeline scripts read
+from, so a dataset present only locally is a cache hit on the next run.
 
 Stop the session when done:
 ```

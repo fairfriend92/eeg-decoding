@@ -119,7 +119,9 @@ Run a NeuralBench-native baseline (e.g. REVE) for real, bypassing
 scripts/colab_neuralbench.sh -s trainer --gpu A100 -- --model reve --dataset dreyer2023
 ```
 `--collect-only` skips recomputation and reads back an already-completed
-run's cached results.
+run's cached results, for any `--model` including `eegnet` and `conformer`.
+The other arguments must match the original run, and a run of one of our
+models made with `--save-checkpoint` is read back by passing that flag too.
 
 Train one of our models through NeuralBench's own harness and keep the
 trained checkpoint (backbone plus the linear probe the `finetune_*`

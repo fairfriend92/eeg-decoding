@@ -7,3 +7,4 @@ data/
 output/*
 !output/figures/
 !output/figures/**
+CLAUDE.md

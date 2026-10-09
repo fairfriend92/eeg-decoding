@@ -3,7 +3,7 @@
 Populates the MOABB/MNE data directory (``MNE_DATA``) without epoching or
 training, so the download can run on a CPU-only session ahead of a GPU run.
 Subjects whose files are already present are skipped by MOABB. Retries on
-rate limits and timeouts are applied by data_loader.configure_downloads.
+rate limits and timeouts are applied by moabb_downloads.configure_downloads.
 """
 
 import argparse

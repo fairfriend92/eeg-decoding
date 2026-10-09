@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Uploads src/ (and optionally data/) to a running Colab CLI session,
-# preserving the repo's relative layout so config.py's REPO_ROOT-based
-# paths (data/, output/) resolve correctly on the VM.
+# Uploads src/ to a running Colab CLI session, preserving the repo's relative
+# layout so config.py's REPO_ROOT-based paths resolve correctly on the VM.
+# With --data, also uploads the local data/ cache to the Drive data directory
+# the pipeline scripts read from.
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/_colab_common.sh"
 
@@ -11,7 +12,7 @@ SYNC_DATA=0
 usage() {
     echo "Usage: $0 [-s SESSION] [--data]" >&2
     echo "  -s, --session NAME   Target session (omit if only one is active)" >&2
-    echo "  --data               Also upload data/ (744M+, slow, typically a one-time step)" >&2
+    echo "  --data               Also upload data/ to the Drive data dir (744M+, slow, one-time)" >&2
     exit 1
 }
 
@@ -31,8 +32,9 @@ echo "== syncing src/ =="
 upload_tree "${REPO_ROOT}/src" "src"
 
 if [[ "$SYNC_DATA" -eq 1 ]]; then
-    echo "== syncing data/ (this can take a while) =="
-    upload_tree "${REPO_ROOT}/data" "data"
+    echo "== syncing data/ to ${DRIVE_DATA_DIR} (this can take a while) =="
+    mount_drive
+    upload_tree "${REPO_ROOT}/data" "data" "$DRIVE_DATA_DIR"
 else
     echo "skipping data/ (pass --data to upload it)"
 fi

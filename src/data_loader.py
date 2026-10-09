@@ -19,11 +19,7 @@ import time
 import warnings
 
 import moabb
-import moabb.datasets.download as moabb_download
-import moabb.datasets.dreyer2023 as moabb_dreyer2023
 import numpy as np
-import pooch
-import requests
 
 warnings.filterwarnings(
     "ignore",
@@ -39,62 +35,12 @@ from moabb.paradigms import MotorImagery
 
 from config import DATA_DIR, DataConfig
 from datasets import MOABB_DATASET_CLASSES
+import moabb_downloads  # noqa: F401 (applies the download configuration at import)
 
 # Redirects MOABB's download location from its default (~/mne_data) into
 # this project's data/ directory, matching the raw-input-only convention.
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 os.environ.setdefault("MNE_DATA", str(DATA_DIR))
-
-
-MAX_DOWNLOAD_ATTEMPTS = 10
-
-
-def configure_downloads():
-    """Configures MOABB's dataset downloads: verified HTTPS, no rate limit, retries, quiet log.
-
-    Applied once at import. Idempotent.
-    """
-    # Pooch logs the SHA256 of every file fetched without a known hash.
-    pooch.get_logger().setLevel(logging.WARNING)
-
-    # OSF's direct file API returns HTTP 429 after a few requests. The
-    # osf.io/download redirect serves the same files without that limit.
-    moabb_dreyer2023._api_base_url = "https://osf.io/download/"
-
-    original_choose_downloader = getattr(moabb_download, "_original_choose_downloader", moabb_download.choose_downloader)
-    original_retrieve = getattr(moabb_download, "_original_retrieve", moabb_download.retrieve)
-
-    def verified_choose_downloader(*args, **kwargs):
-        downloader = original_choose_downloader(*args, **kwargs)
-        if hasattr(downloader, "kwargs"):
-            # MOABB defaults to verify=False, which makes every request warn.
-            downloader.kwargs["verify"] = True
-            # The default 30 s read timeout is too short for OSF's redirect.
-            downloader.kwargs["timeout"] = 120
-        return downloader
-
-    def retrying_retrieve(*args, **kwargs):
-        for attempt in range(1, MAX_DOWNLOAD_ATTEMPTS + 1):
-            try:
-                return original_retrieve(*args, **kwargs)
-            except requests.exceptions.RequestException as e:
-                if attempt == MAX_DOWNLOAD_ATTEMPTS:
-                    raise
-                # A rate limit needs a long cooldown. A timeout or reset usually clears at once.
-                cooldown_s = 300 if "429" in str(e) else 30
-                print(
-                    f"[download] {type(e).__name__}, retry {attempt}/{MAX_DOWNLOAD_ATTEMPTS} "
-                    f"in {cooldown_s}s", flush=True,
-                )
-                time.sleep(cooldown_s)
-
-    moabb_download._original_choose_downloader = original_choose_downloader
-    moabb_download._original_retrieve = original_retrieve
-    moabb_download.choose_downloader = verified_choose_downloader
-    moabb_download.retrieve = retrying_retrieve
-
-
-configure_downloads()
 
 
 def load_subject(subject_id, cfg: DataConfig):
@@ -181,20 +127,19 @@ def _split_by_session_index(X, y, sessions, cfg: DataConfig):
     return X[train_mask], y[train_mask], X[test_mask], y[test_mask]
 
 
-def _split_within_session_holdout(X, y, sessions, cfg: DataConfig):
-    """Holds out a trailing, per-class fraction of a single session's trials.
+def _split_trailing(X, y, fraction):
+    """Holds out a trailing, per-class fraction of trials.
 
-    Used when a dataset has no second session to hold out (e.g.
-    Dreyer2023). Trailing rather than random, so later-recorded trials
-    (more likely to reflect fatigue/adaptation than earlier ones) are what
-    gets evaluated on, rather than an i.i.d. shuffle across the whole
-    session. Stratified per class so the held-out set isn't dominated by
-    whichever class happened to be recorded last.
+    Trailing rather than random, so later-recorded trials (more likely to
+    reflect fatigue/adaptation than earlier ones) are what gets evaluated
+    on, rather than an i.i.d. shuffle across the whole session. Stratified
+    per class so the held-out set isn't dominated by whichever class
+    happened to be recorded last.
     """
     train_idx, test_idx = [], []
     for label in np.unique(y):
         class_idx = np.where(y == label)[0]
-        n_test    = round(len(class_idx) * cfg.holdout_fraction)
+        n_test    = round(len(class_idx) * fraction)
         test_idx.extend(class_idx[len(class_idx) - n_test:])
         train_idx.extend(class_idx[:len(class_idx) - n_test])
 
@@ -202,6 +147,15 @@ def _split_within_session_holdout(X, y, sessions, cfg: DataConfig):
     test_idx  = np.sort(test_idx)
 
     return X[train_idx], y[train_idx], X[test_idx], y[test_idx]
+
+
+def _split_within_session_holdout(X, y, sessions, cfg: DataConfig):
+    """Holds out a trailing, per-class fraction of a single session's trials.
+
+    Used when a dataset has no second session to hold out (e.g.
+    Dreyer2023).
+    """
+    return _split_trailing(X, y, cfg.holdout_fraction)
 
 
 _SPLIT_STRATEGIES = {
@@ -239,6 +193,27 @@ def split_subject(X, y, sessions, cfg: DataConfig):
         ) from None
 
     return split_fn(X, y, sessions, cfg)
+
+
+def split_validation(X, y, cfg: DataConfig):
+    """Carves a trailing, per-class validation slice off a training split.
+
+    Parameters
+    ----------
+    X : ndarray, shape (n_trials, n_channels, n_times)
+        Training trials in recording order.
+    y : ndarray, shape (n_trials,)
+        Integer class labels.
+    cfg : DataConfig
+        Provides val_fraction.
+
+    Returns
+    -------
+    X_fit, y_fit, X_val, y_val : ndarray
+        Training trials split into a fitting part and a later validation
+        part, with no overlap.
+    """
+    return _split_trailing(X, y, cfg.val_fraction)
 
 
 def normalize_subject(X_train, X_test, eps=1e-8):
@@ -324,3 +299,27 @@ def get_subject_data(subject_id, cfg: DataConfig):
     X_train, y_train, X_test, y_test = split_subject(X, y, sessions, cfg)
     X_train, X_test = normalize_subject(X_train, X_test)
     return X_train, y_train, X_test, y_test
+
+
+def get_subject_validation_data(subject_id, cfg: DataConfig):
+    """Loads a subject's data with a validation slice carved from training.
+
+    Parameters
+    ----------
+    subject_id : int
+        Subject identifier, valid for cfg.dataset.
+    cfg : DataConfig
+        Filtering, epoching, and split parameters.
+
+    Returns
+    -------
+    X_fit, y_fit, X_val, y_val : ndarray
+        The training split minus its trailing validation slice, normalized
+        with statistics of the fitting part only. The test split is never
+        returned or used.
+    """
+    X, y, sessions = load_subject(subject_id, cfg)
+    X_train, y_train, _, _ = split_subject(X, y, sessions, cfg)
+    X_fit, y_fit, X_val, y_val = split_validation(X_train, y_train, cfg)
+    X_fit, X_val = normalize_subject(X_fit, X_val)
+    return X_fit, y_fit, X_val, y_val

@@ -69,6 +69,11 @@ class DataConfig:
     holdout_fraction : float, optional
         Fraction of each class's trailing trials held out by the
         "within_session_holdout" strategy.
+    val_fraction : float
+        Fraction of each class's trailing training trials carved out as the
+        ensemble-selection validation slice (see data_loader.split_validation).
+        Disjoint from the test split by construction, since it is taken from
+        the training portion only.
     """
 
     dataset: str = "bci2a"
@@ -87,6 +92,7 @@ class DataConfig:
     test_session: str = "1test"
     n_train_sessions: int = None
     holdout_fraction: float = None
+    val_fraction: float = 0.2
 
 
 @dataclass

@@ -50,6 +50,7 @@ sys.path.insert(0, str(_here.parent.parent / "src"))
 import torch
 import torch.nn as nn
 
+import moabb_downloads  # noqa: F401 (applies the download configuration at import)
 from config import ConformerConfig, EEGNetConfig, PatchTransformerConfig
 from models.eegnet import EEGNet
 from models.conformer import EEGConformer
@@ -423,6 +424,74 @@ def _stage_moabb_data_locally(local_root=Path("/content/local_neuralbench_data")
     print(f"[stage] NeuralBench DATA_DIR redirected to local copy at {local_root}", flush=True)
 
 
+def _require_downloaded(cfg):
+    """Raises unless a study's corpus is already on disk.
+
+    A run session never fetches data. The download belongs to a separate
+    CPU-only session (``--download``), so a missing corpus fails fast instead
+    of spending GPU time on a rate-limited fetch. Checks the same marker
+    file NeuralBench's own download step checks.
+
+    Parameters
+    ----------
+    cfg : dict
+        One NeuralBench experiment config.
+
+    Raises
+    ------
+    ValueError
+        If the study's ``timelines.csv`` is missing.
+    """
+    source = cfg["data.study.source"]
+    marker = Path(source["path"]) / source["name"] / "timelines.csv"
+    if not marker.exists():
+        raise ValueError(
+            f"{source['name']} is not downloaded ({marker} is missing). Run "
+            "colab_neuralbench.sh with --download on a CPU-only session first."
+        )
+
+
+def _our_model_configs_args(args, keep_checkpoints):
+    """Builds the overlay and phase kwargs NeuralBench needs for one of our models.
+
+    The single place that reads MODEL_ADAPTERS, so every path that runs or
+    reads back one of our models builds identical configs. A new model needs
+    only a MODEL_ADAPTERS entry.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Parsed CLI arguments; args.model must be a MODEL_ADAPTERS key.
+    keep_checkpoints : bool
+        Sets delete_checkpoints_on_exit to False when True. The override
+        enters the experiment digest, so a read-back must use the same value
+        as the run it reads.
+
+    Returns
+    -------
+    overlay : dict
+        Config overlay replacing NeuralBench's brain model with ours.
+    phase : dict
+        Keyword arguments for neuralbench.evaluate._experiment_configs.
+    """
+    from neuralbench.evaluate import _external_config
+
+    adapter_cls, cfg_cls = MODEL_ADAPTERS[args.model]
+    model = adapter_cls(args.n_classes, cfg_cls(), pretrained_trunk_path=args.pretrained_trunk)
+    config = _external_config(model)
+    overlay = {
+        "brain_model_name": f"ours-{args.model}",
+        "brain_model_config": {"=replace=": True, **config.model_dump()},
+    }
+    phase = dict(
+        device="eeg", task=args.task,
+        overrides={"delete_checkpoints_on_exit": False} if keep_checkpoints else None,
+        downstream_wrapper=args.downstream_wrapper,
+        cluster=None, debug=args.debug, dataset=args.dataset,
+    )
+    return overlay, phase
+
+
 def _run_and_save_checkpoint(args):
     """Runs a real NeuralBench training experiment for --model and saves its
     trained checkpoint, not just its scores, for scripts/submission/.
@@ -447,6 +516,10 @@ def _run_and_save_checkpoint(args):
     output, that probe at "model.probe.". Both must ship in weights.pt:
     scripts/submission/submission.py's model applies them in the same order.
 
+    The per-seed scores are written to ``<model>_results.json`` before the
+    save is attempted, and the parent directory of args.save_checkpoint is
+    created if missing.
+
     Parameters
     ----------
     args : argparse.Namespace
@@ -456,33 +529,21 @@ def _run_and_save_checkpoint(args):
     -------
     None
     """
-    from neuralbench.evaluate import _external_config, _experiment_configs, _run
-    from neuralbench.experiment_config import _download_dataset
+    from neuralbench.evaluate import _experiment_configs, _run
 
-    adapter_cls, cfg_cls = MODEL_ADAPTERS[args.model]
-    model = adapter_cls(args.n_classes, cfg_cls(), pretrained_trunk_path=args.pretrained_trunk)
-
-    config = _external_config(model)
-    overlay = {
-        "brain_model_name": f"ours-{args.model}",
-        "brain_model_config": {"=replace=": True, **config.model_dump()},
-    }
     # delete_checkpoints_on_exit defaults to True (main.py's Experiment):
-    # without this override, the checkpoint we need is unlinked the moment
+    # without keep_checkpoints, the checkpoint we need is unlinked the moment
     # the run finishes.
-    phase = dict(
-        device="eeg", task=args.task,
-        overrides={"delete_checkpoints_on_exit": False},
-        downstream_wrapper=args.downstream_wrapper,
-        cluster=None, debug=args.debug, dataset=args.dataset,
-    )
+    overlay, phase = _our_model_configs_args(args, keep_checkpoints=True)
     configs = _experiment_configs(overlay, **phase)
 
     for cfg in {c["data.study.source"]["name"]: c for c in configs}.values():
-        _download_dataset(cfg)
+        _require_downloaded(cfg)
     _with_heartbeat(_stage_moabb_data_locally)
     _with_heartbeat(lambda: _run(_experiment_configs(overlay, prepare=True, **phase), args.debug))
     agg = _with_heartbeat(lambda: _run(configs, args.debug))
+    _print_and_save_results(_with_heartbeat(lambda: agg.collect(cached_only=True)), args.model)
+    args.save_checkpoint.parent.mkdir(parents=True, exist_ok=True)
 
     net_prefix, probe_prefix = "model.wrapped_model.net.", "model.probe."
     for experiment in agg.experiments:
@@ -521,12 +582,6 @@ def _run_native_baseline(args):
     plot_all_results, which raises for a single-model result set like this
     one (it compares models against each other).
 
-    args.collect_only skips prepare() (which calls each experiment's
-    run(), recomputing anything not cleanly cached) and only calls
-    collect(cached_only=True), a pickle-load with no recomputation. Use it
-    to read back results from an already-completed run without risking a
-    partially-failed job's cache entry triggering a real rerun.
-
     Parameters
     ----------
     args : argparse.Namespace
@@ -546,17 +601,73 @@ def _run_native_baseline(args):
     configs = build_experiment_configs(
         "eeg", args.task, model=args.model, dataset=args.dataset, debug=args.debug,
     )
+    for cfg in {c["data.study.source"]["name"]: c for c in configs}.values():
+        _require_downloaded(cfg)
     agg = BenchmarkAggregator(experiments=configs, debug=True)
-    if not args.collect_only:
-        _with_heartbeat(agg.prepare)
-    results = agg.collect(cached_only=args.collect_only)
+    _with_heartbeat(agg.prepare)
+    _print_and_save_results(agg.collect(), args.model)
+
+
+def _print_and_save_results(results, model_name):
+    """Prints collected experiment results and writes them to JSON.
+
+    Parameters
+    ----------
+    results : list
+        Output of BenchmarkAggregator.collect.
+    model_name : str
+        Prefix of the output file, ``<model_name>_results.json``.
+
+    Returns
+    -------
+    None
+    """
+    import json
+
     for result in results:
         print(result)
-
-    import json
-    with open("reve_results.json", "w") as f:
+    path = f"{model_name}_results.json"
+    with open(path, "w") as f:
         json.dump(results, f, indent=2, default=str)
-    print("wrote reve_results.json")
+    print(f"wrote {path}")
+
+
+def _collect_cached(args):
+    """Reads back an already-completed run's results from the cache.
+
+    Skips prepare() (which calls each experiment's run(), recomputing
+    anything not cleanly cached) and only calls collect(cached_only=True), a
+    pickle-load with no recomputation. Works for any --model: one of ours
+    (a MODEL_ADAPTERS key) or a NeuralBench-native baseline. The CLI
+    arguments must match the original run, since they enter the cache key.
+    For one of our models, passing --save-checkpoint reads back a run made
+    with that flag, which keeps checkpoints and so changes the key.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Parsed CLI arguments.
+
+    Returns
+    -------
+    None
+    """
+    from neuralbench.experiment_config import build_experiment_configs
+    from neuralbench.main import BenchmarkAggregator
+
+    if args.model in MODEL_ADAPTERS:
+        from neuralbench.evaluate import _experiment_configs
+
+        overlay, phase = _our_model_configs_args(
+            args, keep_checkpoints=args.save_checkpoint is not None,
+        )
+        configs = _experiment_configs(overlay, **phase)
+    else:
+        configs = build_experiment_configs(
+            "eeg", args.task, model=args.model, dataset=args.dataset, debug=args.debug,
+        )
+    agg = BenchmarkAggregator(experiments=configs, debug=True)
+    _print_and_save_results(_with_heartbeat(lambda: agg.collect(cached_only=True)), args.model)
 
 
 def main():
@@ -588,13 +699,14 @@ def main():
     )
     parser.add_argument(
         "--collect-only", action="store_true",
-        help="For a NeuralBench-native --model (e.g. reve): skip prepare() and read "
-             "back already-cached results with a pickle-load only, no recomputation. "
-             "Ignored for --model eegnet/patch_transformer/conformer.",
+        help="Skip prepare() and read back an already-completed run's cached results "
+             "with a pickle-load only, no recomputation. Works for every --model; "
+             "the other arguments must match the original run. With one of our "
+             "models, add --save-checkpoint to read back a run made with it.",
     )
     parser.add_argument(
         "--download", action="store_true",
-        help="Download --dataset's corpus via neuralbench's own CLI, heartbeat-wrapped, "
+        help="Download --dataset's corpus through neuralbench, heartbeat-wrapped, "
              "then exit without building a model or running check_model/evaluate_model.",
     )
     parser.add_argument(
@@ -620,11 +732,16 @@ def main():
     torch.set_float32_matmul_precision("high")
 
     if args.download:
-        returncode = _run_with_heartbeat(
-            ["neuralbench", "eeg", args.task, "--dataset", args.dataset, "--download"]
-        )
-        if returncode != 0:
-            raise RuntimeError(f"neuralbench download exited with code {returncode}")
+        # In-process, not the neuralbench CLI, so moabb_downloads' patch applies.
+        from neuralbench.experiment_config import build_experiment_configs
+
+        _with_heartbeat(lambda: build_experiment_configs(
+            "eeg", args.task, dataset=args.dataset, download=True,
+        ))
+        return
+
+    if args.collect_only:
+        _collect_cached(args)
         return
 
     if args.model not in MODEL_ADAPTERS:
@@ -646,25 +763,14 @@ def main():
     if args.check_only:
         return
 
-    # Downloaded (Drive-backed, durable) and staged locally ourselves here so
-    # evaluate_model's own real run reads the fast local copy: see
-    # _stage_moabb_data_locally's docstring. download=False below skips its
-    # own redundant internal download of the same, now-cached corpus.
-    from neuralbench.evaluate import _external_config, _experiment_configs
-    from neuralbench.experiment_config import _download_dataset
+    # Staged locally here so evaluate_model's own real run reads the fast
+    # local copy: see _stage_moabb_data_locally's docstring. The corpus must
+    # already be downloaded (checked below), hence download=False.
+    from neuralbench.evaluate import _experiment_configs
 
-    config = _external_config(model)
-    overlay = {
-        "brain_model_name": f"ours-{args.model}",
-        "brain_model_config": {"=replace=": True, **config.model_dump()},
-    }
-    phase = dict(
-        device="eeg", task=args.task, overrides=None,
-        downstream_wrapper=args.downstream_wrapper,
-        cluster=None, debug=args.debug, dataset=args.dataset,
-    )
+    overlay, phase = _our_model_configs_args(args, keep_checkpoints=False)
     for cfg in {c["data.study.source"]["name"]: c for c in _experiment_configs(overlay, **phase)}.values():
-        _download_dataset(cfg)
+        _require_downloaded(cfg)
     _with_heartbeat(_stage_moabb_data_locally)
 
     print("== evaluate_model ==")

@@ -37,10 +37,12 @@ ensure_session() {
 }
 
 # Uploads a local directory tree to REMOTE_ROOT/<remote_subdir>, preserving
-# structure and skipping __pycache__. Requires SESSION_ARGS to be set.
+# structure and skipping __pycache__. An optional third argument replaces
+# REMOTE_ROOT/<remote_subdir> as the absolute destination. Requires
+# SESSION_ARGS to be set.
 upload_tree() {
     local local_dir="$1" remote_subdir="$2"
-    local remote_base="${REMOTE_ROOT}/${remote_subdir}"
+    local remote_base="${3:-${REMOTE_ROOT}/${remote_subdir}}"
     local file rel remote remote_dirs
 
     # The Jupyter contents API `colab upload` talks to returns a 500 if the

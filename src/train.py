@@ -10,6 +10,12 @@ split(s) above (see compute_matched_epochs), saved as a separate "final"
 checkpoint. Writes output/{model}_checkpoints.json, a manifest of
 checkpoint paths and validation accuracies.
 
+--val-fit retrains each manifest subject on the training split minus its
+trailing validation slice, for the same step-matched epoch budget as the
+final fit and with no early stopping, and checkpoints it as "valfit". Its
+validation probabilities are unbiased by selection, which dump_predictions.py
+uses for ensemble weighting.
+
 --csp-init (EEGNet only), --pretrain (both models), and --init-trunk (both
 models) are optional, off-by-default, mutually exclusive alternatives to
 random weight init. See csp_init.py, pretrain_loso, and pretrain_trunk.py
@@ -36,7 +42,7 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from config import OUTPUT_DIR, Config, add_dataset_cli_args, make_config, resolve_config
 from csp_init import csp_initialize
-from data_loader import crop_trials, get_subject_data
+from data_loader import crop_trials, get_subject_data, get_subject_validation_data
 from models.conformer import EEGConformer
 from models.patch_transformer import PatchTransformer
 from models.eegnet import EEGNet
@@ -850,6 +856,43 @@ def train_one_subject(subject_id, model_name, cfg: Config, n_folds=1, cropped_cf
     }
 
 
+def run_validation_fits(model_name, cfg: Config):
+    """Trains one validation-slice-excluded model per manifest subject.
+
+    Parameters
+    ----------
+    model_name : str
+        One of "eegnet", "patch_transformer", "conformer". Its checkpoint
+        manifest must already exist (see run_all_subjects).
+    cfg : Config
+        Full project configuration. Only manifest subjects also in
+        cfg.data.subject_ids are fitted.
+
+    Raises
+    ------
+    ValueError
+        If the manifest was trained with crops.
+    """
+    with open(output_dir_for(cfg) / f"{model_name}_checkpoints.json") as f:
+        manifest = json.load(f)
+
+    for entry in manifest:
+        if entry["subject"] not in cfg.data.subject_ids:
+            continue
+        if entry["cropped"] is not None:
+            raise ValueError("Validation fits do not support cropped checkpoints.")
+        subject_id = entry["subject"]
+        X_train_full, _, _, _ = get_subject_data(subject_id, cfg.data)
+        X_fit, y_fit, _, _ = get_subject_validation_data(subject_id, cfg.data)
+
+        # Matches total gradient steps of the final fit on the smaller fitting set.
+        n_epochs = compute_matched_epochs(
+            [(entry["final_n_epochs"] - 1, len(X_train_full))], len(X_fit), cfg.train.batch_size
+        )
+        model = fit_full(X_fit, y_fit, model_name, cfg, n_epochs, subject_id=subject_id)
+        torch.save(model.state_dict(), checkpoints_dir_for(cfg) / f"{model_name}_subject{subject_id}_valfit.pt")
+
+
 def run_all_subjects(model_name, cfg: Config = None, n_folds=1, cropped_cfg=None, csp_init=False, pretrain=False, trunk_state=None):
     """Trains one model (or one per fold) per subject; writes a checkpoint
     manifest to disk.
@@ -935,6 +978,11 @@ if __name__ == "__main__":
              "each subject's trunk layers, leaving spatial_conv/classifier at random init sized "
              "for this dataset. Off by default. Mutually exclusive with --pretrain/--csp-init.",
     )
+    parser.add_argument(
+        "--val-fit", action="store_true",
+        help="Instead of the normal run, train validation-slice-excluded models for the "
+             "subjects of an existing checkpoint manifest.",
+    )
     add_dataset_cli_args(parser)
     args = parser.parse_args()
 
@@ -944,6 +992,9 @@ if __name__ == "__main__":
         parser.error("--init-trunk cannot be combined with --pretrain or --csp-init")
 
     cfg = resolve_config(args, model=args.model)
+    if args.val_fit:
+        run_validation_fits(args.model, cfg)
+        raise SystemExit
     cropped_cfg = cfg.cropped if args.cropped else None
     trunk_state = torch.load(args.init_trunk, map_location="cpu") if args.init_trunk is not None else None
     run_all_subjects(
