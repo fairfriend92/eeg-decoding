@@ -6,3 +6,4 @@ scikit-learn>=1.4
 matplotlib>=3.8
 pyyaml>=6.0
 pyriemann>=0.6
+braindecode[hug]>=1.3
