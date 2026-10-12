@@ -28,6 +28,23 @@ from train import output_dir_for
 
 N_BANDS = 8
 N_CSP_COMPONENTS = 4
+FILTER_CHUNK = 500    # trials filtered at once, bounds sosfiltfilt's float64 copies
+MAX_CSP_FIT_TRIALS = 3000
+
+
+def _bandpass(sos, X):
+    """Zero-phase filters trials in chunks and returns float32."""
+    out = np.empty(X.shape, dtype=np.float32)
+    for start in range(0, len(X), FILTER_CHUNK):
+        out[start:start + FILTER_CHUNK] = sosfiltfilt(sos, X[start:start + FILTER_CHUNK], axis=-1)
+    return out
+
+
+def _csp_transform(csp, sos, X):
+    """Band-filters and projects trials chunk by chunk, returning log-variance features."""
+    return np.concatenate([
+        csp.transform(_bandpass(sos, X[start:start + FILTER_CHUNK])) for start in range(0, len(X), FILTER_CHUNK)
+    ])
 
 
 def fbcsp_features(X_train, X_test, y_train, cfg: Config):
@@ -48,19 +65,40 @@ def fbcsp_features(X_train, X_test, y_train, cfg: Config):
         Concatenated log-variance CSP features.
     """
     edges = np.linspace(cfg.data.l_freq, cfg.data.h_freq, N_BANDS + 1)
+
+    # CSP filters from more trials than this barely change; fitting on all of them multiplies memory.
+    fit_idx = np.arange(len(X_train))
+    if len(fit_idx) > MAX_CSP_FIT_TRIALS:
+        fit_idx = np.sort(np.random.default_rng(0).choice(fit_idx, MAX_CSP_FIT_TRIALS, replace=False))
+
     F_train, F_test = [], []
     for lo, hi in zip(edges[:-1], edges[1:]):
         sos = butter(4, [lo, hi], btype="bandpass", fs=cfg.data.resample_freq, output="sos")
-        Xb_train = sosfiltfilt(sos, X_train, axis=-1)
-        Xb_test  = sosfiltfilt(sos, X_test, axis=-1)
         csp = CSP(n_components=N_CSP_COMPONENTS, log=True)
         with use_log_level("ERROR"):
-            F_train.append(csp.fit_transform(Xb_train, y_train))
-            F_test.append(csp.transform(Xb_test))
+            csp.fit(_bandpass(sos, X_train[fit_idx]), y_train[fit_idx])
+            F_train.append(_csp_transform(csp, sos, X_train))
+            F_test.append(_csp_transform(csp, sos, X_test))
     return np.concatenate(F_train, axis=1), np.concatenate(F_test, axis=1)
 
 
-def _fit_predict(X_train, y_train, X_eval, cfg: Config):
+def fit_predict_fbcsp(X_train, y_train, X_eval, cfg: Config):
+    """Fits the filter-bank CSP classifier and predicts class probabilities.
+
+    Parameters
+    ----------
+    X_train, X_eval : ndarray, shape (n_trials, n_channels, n_times)
+        Fitting and evaluation trials.
+    y_train : ndarray, shape (n_trials,)
+        Fitting labels.
+    cfg : Config
+        Supplies the passband and sampling rate, see fbcsp_features.
+
+    Returns
+    -------
+    ndarray, shape (len(X_eval), n_classes)
+        Class probabilities.
+    """
     F_train, F_eval = fbcsp_features(X_train, X_eval, y_train, cfg)
 
     # Features are log-variances on very different scales across bands.
@@ -94,7 +132,7 @@ def fbcsp_subject(subject_id, cfg: Config):
     """
     X_fit, y_fit, X_val, y_val = get_subject_validation_data(subject_id, cfg.data)
     X_train, y_train, X_test, y_test = get_subject_data(subject_id, cfg.data)
-    return _fit_predict(X_fit, y_fit, X_val, cfg), y_val, _fit_predict(X_train, y_train, X_test, cfg), y_test
+    return fit_predict_fbcsp(X_fit, y_fit, X_val, cfg), y_val, fit_predict_fbcsp(X_train, y_train, X_test, cfg), y_test
 
 
 def dump_fbcsp(cfg: Config, subjects=None):

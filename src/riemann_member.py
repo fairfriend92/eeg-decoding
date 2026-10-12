@@ -24,7 +24,21 @@ from data_loader import get_subject_data, get_subject_validation_data
 from train import output_dir_for
 
 
-def _fit_predict(X_train, y_train, X_eval):
+def fit_predict_riemann(X_train, y_train, X_eval):
+    """Fits the tangent-space classifier and predicts class probabilities.
+
+    Parameters
+    ----------
+    X_train, X_eval : ndarray, shape (n_trials, n_channels, n_times)
+        Fitting and evaluation trials.
+    y_train : ndarray, shape (n_trials,)
+        Fitting labels.
+
+    Returns
+    -------
+    ndarray, shape (len(X_eval), n_classes)
+        Class probabilities.
+    """
     clf = make_pipeline(Covariances(estimator="oas"), TangentSpace(metric="riemann"), LogisticRegression(max_iter=1000))
     clf.fit(X_train, y_train)
     return clf.predict_proba(X_eval)
@@ -55,7 +69,7 @@ def riemann_subject(subject_id, cfg: Config):
     """
     X_fit, y_fit, X_val, y_val = get_subject_validation_data(subject_id, cfg.data)
     X_train, y_train, X_test, y_test = get_subject_data(subject_id, cfg.data)
-    return _fit_predict(X_fit, y_fit, X_val), y_val, _fit_predict(X_train, y_train, X_test), y_test
+    return fit_predict_riemann(X_fit, y_fit, X_val), y_val, fit_predict_riemann(X_train, y_train, X_test), y_test
 
 
 def dump_riemann(cfg: Config, subjects=None):

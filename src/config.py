@@ -74,6 +74,15 @@ class DataConfig:
         ensemble-selection validation slice (see data_loader.split_validation).
         Disjoint from the test split by construction, since it is taken from
         the training portion only.
+    test_subject_ids : list of int, optional
+        Participants held out whole as the test set of a cross-subject split
+        (see data_loader.get_cross_subject_data). None for datasets with no
+        such split.
+    val_subject_fraction : float
+        Fraction of the remaining participants held out whole as the
+        cross-subject validation set.
+    val_subject_seed : int
+        Seed of the participant-level validation draw.
     """
 
     dataset: str = "bci2a"
@@ -93,6 +102,9 @@ class DataConfig:
     n_train_sessions: int = None
     holdout_fraction: float = None
     val_fraction: float = 0.2
+    test_subject_ids: list = None
+    val_subject_fraction: float = 0.2
+    val_subject_seed: int = 33
 
 
 @dataclass

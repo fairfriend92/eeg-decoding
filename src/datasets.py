@@ -62,6 +62,7 @@ DATASET_PRESETS = {
         resample_freq=250.0,
         split_strategy="within_session_holdout",
         holdout_fraction=0.2,
+        test_subject_ids=list(range(61, 82)),
     ),
     "stieger2021": DataConfig(
         dataset="stieger2021",
@@ -78,6 +79,9 @@ DATASET_PRESETS = {
         n_channels=30,
         subject_ids=list(range(1, 10)),
         resample_freq=250.0,
+        # Within-session cross-validation on the training session peaks for the 4-8 s window.
+        tmin=4.0,
+        tmax=8.0,
         split_strategy="fixed_sessions",
         train_session="0",    # unverified placeholder, see module docstring
         test_session="1",     # unverified placeholder, see module docstring

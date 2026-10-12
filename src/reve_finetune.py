@@ -29,7 +29,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from sklearn.metrics import balanced_accuracy_score
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import GroupShuffleSplit, train_test_split
 
 from config import Config, add_dataset_cli_args, resolve_config
 from reve_embeddings import REVE_CLIP_STD, REVE_SAMPLING_RATE, load_reve
@@ -60,7 +60,7 @@ def _predict(model, head, X, pos, device):
     return torch.cat(probs).numpy()
 
 
-def finetune_predict(model, head, init_state, X_fit, y_fit, X_eval, pos, device, seed):
+def finetune_predict(model, head, init_state, X_fit, y_fit, X_eval, pos, device, seed, groups=None):
     """Fine-tunes REVE from its initial weights, then predicts X_eval.
 
     Follows NeuralBench's full fine-tune recipe: AdamW with a OneCycle
@@ -88,6 +88,10 @@ def finetune_predict(model, head, init_state, X_fit, y_fit, X_eval, pos, device,
         Device to train and predict on.
     seed : int
         Seeds the inner split and the shuffling.
+    groups : ndarray, shape (n_fit,), optional
+        Participant id of every fit trial. If given, the early-stopping fifth
+        is held out by participant instead of by trial, so the stopping score
+        measures transfer to unseen participants.
 
     Returns
     -------
@@ -97,7 +101,11 @@ def finetune_predict(model, head, init_state, X_fit, y_fit, X_eval, pos, device,
     model.load_state_dict(init_state["model"])
     head.load_state_dict(init_state["head"])
     X_fit = np.clip(X_fit, -REVE_CLIP_STD, REVE_CLIP_STD)
-    X_tr, X_in, y_tr, y_in = train_test_split(X_fit, y_fit, test_size=FINETUNE_INNER_VAL_FRACTION, stratify=y_fit, random_state=seed)
+    if groups is None:
+        X_tr, X_in, y_tr, y_in = train_test_split(X_fit, y_fit, test_size=FINETUNE_INNER_VAL_FRACTION, stratify=y_fit, random_state=seed)
+    else:
+        tr, inner = next(GroupShuffleSplit(n_splits=1, test_size=FINETUNE_INNER_VAL_FRACTION, random_state=seed).split(X_fit, y_fit, groups))
+        X_tr, X_in, y_tr, y_in = X_fit[tr], X_fit[inner], y_fit[tr], y_fit[inner]
     X_tr, y_tr = torch.tensor(X_tr, dtype=torch.float32), torch.tensor(y_tr, dtype=torch.long)
 
     params = list(model.parameters()) + list(head.parameters())

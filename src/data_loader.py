@@ -20,6 +20,9 @@ import warnings
 
 import moabb
 import numpy as np
+from joblib import Parallel, delayed
+from joblib.externals.loky import get_reusable_executor
+from sklearn.model_selection import train_test_split
 
 warnings.filterwarnings(
     "ignore",
@@ -33,7 +36,7 @@ moabb.set_download_provider("upstream")
 
 from moabb.paradigms import MotorImagery
 
-from config import DATA_DIR, DataConfig
+from config import DATA_DIR, OUTPUT_DIR, DataConfig
 from datasets import MOABB_DATASET_CLASSES
 import moabb_downloads  # noqa: F401 (applies the download configuration at import)
 
@@ -323,3 +326,75 @@ def get_subject_validation_data(subject_id, cfg: DataConfig):
     X_fit, y_fit, X_val, y_val = split_validation(X_train, y_train, cfg)
     X_fit, X_val = normalize_subject(X_fit, X_val)
     return X_fit, y_fit, X_val, y_val
+
+
+def _load_subject_cached(subject_id, cfg: DataConfig, cache_dir=None):
+    """Loads a subject's epochs through an on-disk float32 cache.
+
+    The cache file name carries every parameter that changes the epochs, so a
+    changed filter band or window never reads a stale file.
+    """
+    tag = f"{cfg.l_freq:g}-{cfg.h_freq:g}Hz_{cfg.tmin:g}-{cfg.tmax:g}s_{cfg.resample_freq:g}Hz"
+    path = (cache_dir or OUTPUT_DIR / cfg.dataset / "epochs_cache") / tag / f"subject{subject_id}.npz"
+    if path.exists():
+        cached = np.load(path)
+        return cached["X"], cached["y"]
+    X, y, _ = load_subject(subject_id, cfg)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(path, X=X.astype(np.float32), y=y)
+    return X.astype(np.float32), y
+
+
+def get_cross_subject_data(cfg: DataConfig, n_jobs=6, cache_dir=None):
+    """Loads every participant and splits them whole into fit, validation and test.
+
+    Test participants are cfg.test_subject_ids. A fraction of the remaining
+    participants, drawn with cfg.val_subject_seed, forms the validation set
+    and the rest the fitting set. Each participant's trials are z-scored per
+    channel with that participant's own statistics, which uses no labels.
+
+    Parameters
+    ----------
+    cfg : DataConfig
+        Dataset identity, epoching parameters and the participant split.
+    n_jobs : int
+        Worker processes used to epoch participants missing from the cache.
+    cache_dir : Path, optional
+        Directory of the per-participant epoch caches; defaults to
+        output/{dataset}/epochs_cache/. Pointing it at persistent storage
+        lets a run on a fresh machine resume.
+
+    Returns
+    -------
+    dict
+        For each part in "fit", "val" and "test", the arrays "X_{part}",
+        "y_{part}" and "subject_{part}" (participant id of every trial),
+        concatenated in participant order.
+
+    Raises
+    ------
+    ValueError
+        If the dataset has no cross-subject test participants.
+    """
+    if cfg.test_subject_ids is None:
+        raise ValueError(f"Dataset '{cfg.dataset}' defines no test_subject_ids.")
+    train_ids = [s for s in cfg.subject_ids if s not in cfg.test_subject_ids]
+    fit_ids, val_ids = train_test_split(train_ids, test_size=cfg.val_subject_fraction, random_state=cfg.val_subject_seed)
+    parts = {"fit": sorted(fit_ids), "val": sorted(val_ids), "test": sorted(cfg.test_subject_ids)}
+
+    loaded = dict(zip(cfg.subject_ids, Parallel(n_jobs=n_jobs)(delayed(_load_subject_cached)(s, cfg, cache_dir) for s in cfg.subject_ids)))
+    # Idle loky workers otherwise keep their memory for the rest of the run.
+    get_reusable_executor().shutdown(wait=True)
+    data = {}
+    for part, ids in parts.items():
+        X_parts, y_parts, subject_parts = [], [], []
+        for sid in ids:
+            X, y = loaded.pop(sid)
+            mean, std = X.mean(axis=(0, 2), keepdims=True), X.std(axis=(0, 2), keepdims=True)
+            X_parts.append((X - mean) / (std + 1e-8))
+            y_parts.append(y)
+            subject_parts.append(np.full(len(y), sid))
+        data[f"X_{part}"] = np.concatenate(X_parts)
+        data[f"y_{part}"] = np.concatenate(y_parts)
+        data[f"subject_{part}"] = np.concatenate(subject_parts)
+    return data
