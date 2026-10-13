@@ -762,6 +762,12 @@ def train_one_subject(subject_id, model_name, cfg: Config, n_folds=1, cropped_cf
         if cropped_cfg is not None else None
     )
 
+    patch_info = (
+        {"patch_size": cfg.patch_transformer.patch_size,
+         "patch_stride": cfg.patch_transformer.patch_stride or cfg.patch_transformer.patch_size}
+        if model_name == "patch_transformer" else None
+    )
+
     checkpoints_dir = checkpoints_dir_for(cfg)
     checkpoints_dir.mkdir(parents=True, exist_ok=True)
 
@@ -808,6 +814,7 @@ def train_one_subject(subject_id, model_name, cfg: Config, n_folds=1, cropped_cf
             "final_n_epochs":   final_n_epochs,
             "final_checkpoint": str(final_ckpt_path),
             "cropped":          cropped_info,
+            "patch":            patch_info,
         }
 
     base_seed = cfg.train.seed + subject_id
@@ -853,6 +860,7 @@ def train_one_subject(subject_id, model_name, cfg: Config, n_folds=1, cropped_cf
         "final_n_epochs":   final_n_epochs,
         "final_checkpoint": str(final_ckpt_path),
         "cropped":          cropped_info,
+        "patch":            patch_info,
     }
 
 

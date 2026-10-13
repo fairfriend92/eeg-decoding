@@ -68,6 +68,14 @@ remote_src = remote_root + '/src'
 drive_data_dir = sys.argv[2]
 eval_args = sys.argv[3:]
 print("import sys, os")
+print(
+    "import threading, time\n"
+    "_hb_stop = threading.Event()\n"
+    "def _heartbeat():\n"
+    "    while not _hb_stop.wait(30):\n"
+    "        print('[heartbeat]', time.strftime('%H:%M:%S'), flush=True)\n"
+    "threading.Thread(target=_heartbeat, daemon=True).start()"
+)
 print(f"os.makedirs({drive_data_dir!r}, exist_ok=True)")
 print(f"os.environ['MNE_DATA'] = {drive_data_dir!r}")
 print(f"sys.path.insert(0, {remote_src!r})")
@@ -79,7 +87,7 @@ print(
     "        del sys.modules[_name]"
 )
 print(f"sys.argv = ['evaluate.py'] + {json.dumps(eval_args)}")
-print("exec(compile(open('evaluate.py').read(), 'evaluate.py', 'exec'))")
+print("try:\n    exec(compile(open('evaluate.py').read(), 'evaluate.py', 'exec'))\nfinally:\n    _hb_stop.set()")
 PYEOF
 
 echo "== running evaluate.py ${EVAL_ARGS[*]:-} =="

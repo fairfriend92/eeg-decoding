@@ -80,6 +80,14 @@ drive_data_dir = sys.argv[2]
 script = sys.argv[3]
 train_args = sys.argv[4:]
 print("import sys, os")
+print(
+    "import threading, time\n"
+    "_hb_stop = threading.Event()\n"
+    "def _heartbeat():\n"
+    "    while not _hb_stop.wait(30):\n"
+    "        print('[heartbeat]', time.strftime('%H:%M:%S'), flush=True)\n"
+    "threading.Thread(target=_heartbeat, daemon=True).start()"
+)
 print(f"os.makedirs({drive_data_dir!r}, exist_ok=True)")
 print(f"os.environ['MNE_DATA'] = {drive_data_dir!r}")
 print(f"sys.path.insert(0, {remote_src!r})")
@@ -91,7 +99,7 @@ print(
     "        del sys.modules[_name]"
 )
 print(f"sys.argv = [{script!r}] + {json.dumps(train_args)}")
-print(f"exec(compile(open({script!r}).read(), {script!r}, 'exec'))")
+print(f"try:\n    exec(compile(open({script!r}).read(), {script!r}, 'exec'))\nfinally:\n    _hb_stop.set()")
 PYEOF
 
 echo "== running ${SCRIPT} ${TRAIN_ARGS[*]:-} =="

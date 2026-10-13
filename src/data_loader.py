@@ -345,13 +345,56 @@ def _load_subject_cached(subject_id, cfg: DataConfig, cache_dir=None):
     return X.astype(np.float32), y
 
 
+def alignment_subset(n_total, n_use):
+    """Indices of the trials a per-participant alignment statistic is estimated from.
+
+    Parameters
+    ----------
+    n_total : int
+        Number of trials the participant has.
+    n_use : int
+        Number of trials to use. 0, or a value of at least n_total, selects all.
+
+    Returns
+    -------
+    ndarray of int
+        Sorted trial indices, drawn with a fixed seed.
+    """
+    if n_use <= 0 or n_use >= n_total:
+        return np.arange(n_total)
+    return np.sort(np.random.default_rng(0).choice(n_total, n_use, replace=False))
+
+
+def euclidean_align(X, n_trials=0):
+    """Whitens one participant's trials with their mean trial covariance.
+
+    Parameters
+    ----------
+    X : ndarray, shape (n_trials, n_channels, n_times)
+        One participant's trials.
+    n_trials : int
+        Trials the mean covariance is estimated from (see alignment_subset).
+
+    Returns
+    -------
+    ndarray, shape (n_trials, n_channels, n_times)
+        Trials whose mean covariance, over the estimation trials, is the identity.
+    """
+    ref = X[alignment_subset(len(X), n_trials)].astype(np.float64)
+    mean_cov = np.einsum("nct,ndt->cd", ref, ref) / (len(ref) * X.shape[2])
+    eigvals, eigvecs = np.linalg.eigh(mean_cov)
+    whitener = (eigvecs / np.sqrt(np.maximum(eigvals, 1e-12))) @ eigvecs.T
+    return np.matmul(whitener.astype(np.float32), X)
+
+
 def get_cross_subject_data(cfg: DataConfig, n_jobs=6, cache_dir=None):
     """Loads every participant and splits them whole into fit, validation and test.
 
     Test participants are cfg.test_subject_ids. A fraction of the remaining
     participants, drawn with cfg.val_subject_seed, forms the validation set
     and the rest the fitting set. Each participant's trials are z-scored per
-    channel with that participant's own statistics, which uses no labels.
+    channel with that participant's own statistics, then optionally
+    Euclidean-aligned (cfg.alignment). Both use no labels.
 
     Parameters
     ----------
@@ -374,8 +417,11 @@ def get_cross_subject_data(cfg: DataConfig, n_jobs=6, cache_dir=None):
     Raises
     ------
     ValueError
-        If the dataset has no cross-subject test participants.
+        If the dataset has no cross-subject test participants, or
+        cfg.alignment is not "none", "euclidean" or "riemannian".
     """
+    if cfg.alignment not in ("none", "euclidean", "riemannian"):
+        raise ValueError(f"Unknown alignment '{cfg.alignment}'. Choices: none, euclidean, riemannian")
     if cfg.test_subject_ids is None:
         raise ValueError(f"Dataset '{cfg.dataset}' defines no test_subject_ids.")
     train_ids = [s for s in cfg.subject_ids if s not in cfg.test_subject_ids]
@@ -391,7 +437,10 @@ def get_cross_subject_data(cfg: DataConfig, n_jobs=6, cache_dir=None):
         for sid in ids:
             X, y = loaded.pop(sid)
             mean, std = X.mean(axis=(0, 2), keepdims=True), X.std(axis=(0, 2), keepdims=True)
-            X_parts.append((X - mean) / (std + 1e-8))
+            X = (X - mean) / (std + 1e-8)
+            if cfg.alignment == "euclidean":
+                X = euclidean_align(X, cfg.alignment_n_trials)
+            X_parts.append(X)
             y_parts.append(y)
             subject_parts.append(np.full(len(y), sid))
         data[f"X_{part}"] = np.concatenate(X_parts)

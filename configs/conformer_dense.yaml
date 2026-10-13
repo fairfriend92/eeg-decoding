@@ -1,0 +1,4 @@
+conformer:
+  kernel_length_ms: 100
+  pool_size_ms: 200
+  pool_stride_ms: 40

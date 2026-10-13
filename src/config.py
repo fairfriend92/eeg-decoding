@@ -83,6 +83,18 @@ class DataConfig:
         cross-subject validation set.
     val_subject_seed : int
         Seed of the participant-level validation draw.
+    alignment : str
+        Per-participant alignment of the cross-subject split, estimated from
+        each participant's own unlabeled trials. "none" leaves the z-scored
+        trials as they are. "euclidean" whitens each participant's trials
+        with the inverse square root of their mean trial covariance
+        (data_loader.get_cross_subject_data). "riemannian" leaves the trials
+        unchanged and recenters each participant's covariance matrices at
+        their Riemannian mean inside the tangent-space member only.
+    alignment_n_trials : int
+        Number of trials per participant the alignment statistic is
+        estimated from, drawn at random with a fixed seed. 0 uses every
+        trial. A small value mimics a short unlabeled scoring batch.
     """
 
     dataset: str = "bci2a"
@@ -105,6 +117,8 @@ class DataConfig:
     test_subject_ids: list = None
     val_subject_fraction: float = 0.2
     val_subject_seed: int = 33
+    alignment: str = "none"
+    alignment_n_trials: int = 0
 
 
 @dataclass
@@ -184,12 +198,24 @@ class ConformerConfig:
     n_filters : int
         Number of temporal and spatial convolution filters.
     kernel_length : int
-        Length of the temporal convolution kernel, in samples.
+        Length of the temporal convolution kernel, in samples. Overwritten
+        by make_config when kernel_length_ms is set.
     pool_size : int
         Average pooling window after the convolutions, in samples. Sets
-        each token's temporal extent.
+        each token's temporal extent. Overwritten by make_config when
+        pool_size_ms is set.
     pool_stride : int
         Average pooling stride, in samples. Sets the token spacing.
+        Overwritten by make_config when pool_stride_ms is set.
+    kernel_length_ms, pool_size_ms, pool_stride_ms : float
+        The three durations above in milliseconds, dataset-independent. 0.0
+        means unset, so the sample counts are used as given. When set,
+        make_config derives the sample counts from data.resample_freq (see
+        resolve_conformer_samples).
+    pool_tokens : bool
+        If True, the classification head averages the encoder output over
+        tokens instead of flattening it, so the head size no longer grows
+        with the token count. Drops explicit token position from the head.
     embed_dim : int
         Token embedding dimension after the 1x1 projection.
     n_heads : int
@@ -208,12 +234,41 @@ class ConformerConfig:
     kernel_length: int = 25
     pool_size: int = 75
     pool_stride: int = 15
+    kernel_length_ms: float = 0.0
+    pool_size_ms: float = 0.0
+    pool_stride_ms: float = 0.0
+    pool_tokens: bool = False
     embed_dim: int = 40
     n_heads: int = 10
     n_layers: int = 6
     ff_expansion: int = 4
     dropout: float = 0.5
     lr: float = 2e-4
+
+
+def resolve_conformer_samples(conformer_cfg: ConformerConfig, resample_freq):
+    """Derives kernel_length, pool_size and pool_stride in samples from their ms values.
+
+    Mutates conformer_cfg in place. Fields whose ms value is 0.0 keep their
+    sample value. Defaults are 100/300/60 ms at 250 Hz (25/75/15 samples).
+
+    Parameters
+    ----------
+    conformer_cfg : ConformerConfig
+        Config to update.
+    resample_freq : float
+        Sampling rate, in Hz, to scale the durations against.
+
+    Returns
+    -------
+    ConformerConfig
+        The same conformer_cfg instance.
+    """
+    for name in ("kernel_length", "pool_size", "pool_stride"):
+        duration_ms = getattr(conformer_cfg, f"{name}_ms")
+        if duration_ms:
+            setattr(conformer_cfg, name, round(duration_ms * resample_freq / 1000))
+    return conformer_cfg
 
 
 @dataclass
@@ -224,6 +279,17 @@ class PatchTransformerConfig:
     ----------
     patch_size : int
         Number of time samples covered by each convolutional patch token.
+        Overwritten by make_config when patch_size_ms is set.
+    patch_stride : int
+        Step between patch starts, in samples. 0 means equal to
+        patch_size (non-overlapping tokens). A smaller value gives
+        overlapping tokens and a proportionally larger token count.
+        Overwritten by make_config when patch_stride_ms is set.
+    patch_size_ms, patch_stride_ms : float
+        Patch length and stride in milliseconds, dataset-independent. 0.0
+        means unset, so the sample counts above are used as given. When
+        set, make_config derives the sample counts from
+        data.resample_freq (see resolve_patch_samples).
     embed_dim : int
         Token embedding dimension.
     n_heads : int
@@ -241,12 +307,41 @@ class PatchTransformerConfig:
     """
 
     patch_size: int = 25
+    patch_stride: int = 0
+    patch_size_ms: float = 0.0
+    patch_stride_ms: float = 0.0
     embed_dim: int = 64
     n_heads: int = 8
     n_layers: int = 4
     ff_dim: int = 256
     dropout: float = 0.5
     lr: float = 3e-4
+
+
+def resolve_patch_samples(patch_cfg: PatchTransformerConfig, resample_freq):
+    """Derives patch_size and patch_stride in samples from their ms values.
+
+    Mutates patch_cfg in place. Fields whose ms value is 0.0 keep their
+    sample value. Durations in ms are dataset-independent; the sample
+    counts are not (100 ms is 25 samples at 250 Hz and 51 at 512 Hz).
+
+    Parameters
+    ----------
+    patch_cfg : PatchTransformerConfig
+        Config to update.
+    resample_freq : float
+        Sampling rate, in Hz, to scale the durations against.
+
+    Returns
+    -------
+    PatchTransformerConfig
+        The same patch_cfg instance.
+    """
+    if patch_cfg.patch_size_ms:
+        patch_cfg.patch_size = round(patch_cfg.patch_size_ms * resample_freq / 1000)
+    if patch_cfg.patch_stride_ms:
+        patch_cfg.patch_stride = round(patch_cfg.patch_stride_ms * resample_freq / 1000)
+    return patch_cfg
 
 
 @dataclass
@@ -364,6 +459,10 @@ def make_config(dataset="bci2a", model=None, overrides=None):
 
     if overrides:
         cfg = apply_overrides(cfg, overrides, model_name=model)
+
+    # After overrides, so an ms override is resolved at the final resample_freq.
+    resolve_patch_samples(cfg.patch_transformer, cfg.data.resample_freq)
+    resolve_conformer_samples(cfg.conformer, cfg.data.resample_freq)
 
     return cfg
 

@@ -10,7 +10,11 @@
 # large client-side ceiling, not an estimate of the run time.
 #
 # Usage:
-#   scripts/colab_cross_subject_members.sh -s SESSION --gpu TYPE --dataset DATASET --members "MEMBER ..." [--config FILE]
+#   scripts/colab_cross_subject_members.sh -s SESSION --gpu TYPE --dataset DATASET --members "MEMBER ..." [--config FILE] [--set "KEY=VALUE ..."] [--suffix SUFFIX]
+#
+# --set passes config overrides through. --suffix is the dump file-name suffix
+# those overrides produce (_ea for data.alignment=euclidean), so the download
+# finds the right files.
 #
 # Example:
 #   scripts/colab_cross_subject_members.sh -s xsubj --gpu A100 --dataset dreyer2023 --members "patch_transformer"
@@ -22,6 +26,8 @@ GPU=""
 DATASET=""
 MEMBERS=""
 CONFIG=""
+SETS=""
+SUFFIX=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -30,7 +36,9 @@ while [[ $# -gt 0 ]]; do
         --dataset) DATASET="$2"; shift 2 ;;
         --members) MEMBERS="$2"; shift 2 ;;
         --config) CONFIG="$2"; shift 2 ;;
-        -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
+        --set) SETS="$2"; shift 2 ;;
+        --suffix) SUFFIX="$2"; shift 2 ;;
+        -h|--help) sed -n '2,21p' "$0"; exit 0 ;;
         *) echo "Unknown argument: $1" >&2; exit 1 ;;
     esac
 done
@@ -66,13 +74,15 @@ echo "import os; os.makedirs('${REMOTE_OUT}', exist_ok=True)" | "$COLAB" exec "$
 SCRATCH="$(mktemp -d)"
 trap 'rm -rf "$SCRATCH"' EXIT
 BOOTSTRAP="${SCRATCH}/bootstrap.py"
-python3 - "$REMOTE_ROOT" "$DRIVE_DATA_DIR" "$DRIVE_ROOT" "$DATASET" "$MEMBERS" "$CONFIG" > "$BOOTSTRAP" <<'PYEOF'
+python3 - "$REMOTE_ROOT" "$DRIVE_DATA_DIR" "$DRIVE_ROOT" "$DATASET" "$MEMBERS" "$CONFIG" "$SETS" > "$BOOTSTRAP" <<'PYEOF'
 import sys, json
-remote_root, drive_data_dir, drive_root, dataset, members, config = sys.argv[1:7]
+remote_root, drive_data_dir, drive_root, dataset, members, config, sets = sys.argv[1:8]
 remote_src = remote_root + '/src'
 args = members.split() + ['--dataset', dataset, '--n-jobs', '2', '--cache-dir', drive_root + '/output/' + dataset]
 if config:
     args += ['--config', remote_root + '/configs/' + config]
+for kv in sets.split():
+    args += ['--set', kv]
 print(f"""import sys, os, time, threading
 os.makedirs({drive_data_dir!r}, exist_ok=True)
 os.environ['MNE_DATA'] = {drive_data_dir!r}
@@ -103,8 +113,8 @@ echo "== running cross_subject_members.py =="
 
 mkdir -p "${REPO_ROOT}/output/${DATASET}/cross_subject"
 for member in $MEMBERS; do
-    echo "== downloading predictions_${member}.npz =="
-    "$COLAB" download "${SESSION_ARGS[@]}" "${REMOTE_OUT}/cross_subject/predictions_${member}.npz" "${REPO_ROOT}/output/${DATASET}/cross_subject/predictions_${member}.npz"
+    echo "== downloading predictions_${member}${SUFFIX}.npz =="
+    "$COLAB" download "${SESSION_ARGS[@]}" "${REMOTE_OUT}/cross_subject/predictions_${member}${SUFFIX}.npz" "${REPO_ROOT}/output/${DATASET}/cross_subject/predictions_${member}${SUFFIX}.npz"
 done
 
 "$COLAB" stop "${SESSION_ARGS[@]}"

@@ -100,6 +100,17 @@ def evaluate_subject(entry, model_name, cfg: Config):
             "Pass the matching --dataset (and any --config/--set used at train time)."
         )
 
+    patch_entry = entry.get("patch")
+    if patch_entry is not None:
+        patch_cfg = cfg.patch_transformer
+        if (patch_entry["patch_size"], patch_entry["patch_stride"]) != (patch_cfg.patch_size, patch_cfg.patch_stride or patch_cfg.patch_size):
+            raise ValueError(
+                f"Checkpoint manifest entry for subject {entry['subject']} was trained with patch "
+                f"size/stride {patch_entry['patch_size']}/{patch_entry['patch_stride']}, but cfg has "
+                f"{patch_cfg.patch_size}/{patch_cfg.patch_stride or patch_cfg.patch_size}. "
+                "Pass the same --set overrides used at train time."
+            )
+
     subject_id = entry["subject"]
     _, _, X_test, y_test = get_subject_data(subject_id, cfg.data)
 

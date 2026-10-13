@@ -1,7 +1,7 @@
 """Patch-token transformer encoder for motor imagery classification.
 
-Tokenizes each trial into non-overlapping temporal patches (patch embedding
-via a strided temporal convolution), applies a single shared spatial filter
+Tokenizes each trial into temporal patches, overlapping when the stride is
+below the patch size (patch embedding via a strided temporal convolution), applies a single shared spatial filter
 across channels, then processes the resulting token sequence with a
 standard transformer encoder. Positional information is injected via fixed
 sinusoidal encodings rather than a learned embedding table.
@@ -19,11 +19,12 @@ class PatchEmbedding(nn.Module):
     """Tokenizes EEG epochs via temporal patches, followed by a shared
     spatial filter across channels.
 
-    The temporal convolution's kernel and stride both equal `patch_size`,
-    so it performs windowing and feature extraction in a single step,
-    producing one token per non-overlapping time window. The spatial
-    convolution then collapses the channel dimension, mixing across all
-    channels identically for every token.
+    The temporal convolution's kernel is `patch_size` and its stride is
+    `patch_stride`, so it performs windowing and feature extraction in a
+    single step, producing one token per time window. A stride below the
+    patch size gives overlapping windows. The spatial convolution then
+    collapses the channel dimension, mixing across all channels
+    identically for every token.
 
     Parameters
     ----------
@@ -32,13 +33,16 @@ class PatchEmbedding(nn.Module):
     embed_dim : int
         Token embedding dimension.
     patch_size : int
-        Number of time samples per patch (token). Trailing samples beyond
-        the last full patch are dropped.
+        Number of time samples per patch (token).
+    patch_stride : int, optional
+        Step between patch starts, in samples. Defaults to patch_size.
+        Trailing samples beyond the last full patch are dropped.
     """
 
-    def __init__(self, n_channels, embed_dim, patch_size):
+    def __init__(self, n_channels, embed_dim, patch_size, patch_stride=None):
         super().__init__()
-        self.temporal_conv = nn.Conv2d(1, embed_dim, (1, patch_size), stride=(1, patch_size), bias=False)
+        patch_stride = patch_stride or patch_size
+        self.temporal_conv = nn.Conv2d(1, embed_dim, (1, patch_size), stride=(1, patch_stride), bias=False)
         self.spatial_conv  = nn.Conv2d(embed_dim, embed_dim, (n_channels, 1), bias=False)
         self.norm          = nn.BatchNorm2d(embed_dim)
         self.activation    = nn.ELU()
@@ -105,7 +109,11 @@ class PatchTransformer(nn.Module):
     def __init__(self, n_channels, n_times, n_classes, cfg: PatchTransformerConfig):
         super().__init__()
 
-        self.patch_embed = PatchEmbedding(n_channels, cfg.embed_dim, cfg.patch_size)
+        patch_stride = cfg.patch_stride or cfg.patch_size
+        if n_times < cfg.patch_size:
+            raise ValueError(f"n_times={n_times} is shorter than patch_size={cfg.patch_size}")
+        self.n_patches   = (n_times - cfg.patch_size) // patch_stride + 1
+        self.patch_embed = PatchEmbedding(n_channels, cfg.embed_dim, cfg.patch_size, patch_stride)
 
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=cfg.embed_dim,

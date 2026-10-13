@@ -28,6 +28,7 @@ from benchmark_utils.base_solver import CompetSolver
 
 # PatchTransformerConfig defaults (src/config.py), inlined: see module docstring.
 _PATCH_SIZE = 25
+_PATCH_STRIDE = 25    # equal to _PATCH_SIZE: non-overlapping tokens
 _EMBED_DIM = 64
 _N_HEADS = 8
 _N_LAYERS = 4
@@ -41,9 +42,10 @@ class PatchEmbedding(nn.Module):
     ``src/models/patch_transformer.py``'s class; see there for the full docstring.
     """
 
-    def __init__(self, n_channels, embed_dim, patch_size):
+    def __init__(self, n_channels, embed_dim, patch_size, patch_stride=None):
         super().__init__()
-        self.temporal_conv = nn.Conv2d(1, embed_dim, (1, patch_size), stride=(1, patch_size), bias=False)
+        patch_stride = patch_stride or patch_size
+        self.temporal_conv = nn.Conv2d(1, embed_dim, (1, patch_size), stride=(1, patch_stride), bias=False)
         self.spatial_conv  = nn.Conv2d(embed_dim, embed_dim, (n_channels, 1), bias=False)
         self.norm          = nn.BatchNorm2d(embed_dim)
         self.activation    = nn.ELU()
@@ -80,7 +82,7 @@ class PatchTransformer(nn.Module):
     def __init__(self, n_channels, n_times, n_classes):
         super().__init__()
 
-        self.patch_embed = PatchEmbedding(n_channels, _EMBED_DIM, _PATCH_SIZE)
+        self.patch_embed = PatchEmbedding(n_channels, _EMBED_DIM, _PATCH_SIZE, _PATCH_STRIDE)
 
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=_EMBED_DIM,

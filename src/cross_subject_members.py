@@ -27,9 +27,16 @@ from train import compute_matched_epochs, fit, fit_full, output_dir_for, predict
 def _riemann_probs(data, cfg: Config):
     X_all = np.concatenate([data["X_fit"], data["X_val"]])
     y_all = np.concatenate([data["y_fit"], data["y_val"]])
+    subject_all = np.concatenate([data["subject_fit"], data["subject_val"]])
+    recenter = cfg.data.alignment == "riemannian"
+    n_trials = cfg.data.alignment_n_trials
     return (
-        fit_predict_riemann(data["X_fit"], data["y_fit"], data["X_val"]),
-        fit_predict_riemann(X_all, y_all, data["X_test"]),
+        fit_predict_riemann(
+            data["X_fit"], data["y_fit"], data["X_val"],
+            data["subject_fit"] if recenter else None, data["subject_val"] if recenter else None, n_trials),
+        fit_predict_riemann(
+            X_all, y_all, data["X_test"],
+            subject_all if recenter else None, data["subject_test"] if recenter else None, n_trials),
     )
 
 
@@ -68,6 +75,14 @@ MEMBERS = {
 }
 
 
+def alignment_suffix(cfg: Config):
+    """File-name suffix of a dump, empty for the unaligned setting."""
+    suffix = {"none": "", "euclidean": "_ea", "riemannian": "_ra"}[cfg.data.alignment]
+    if suffix and cfg.data.alignment_n_trials:
+        suffix += f"_n{cfg.data.alignment_n_trials}"
+    return suffix
+
+
 def dump_cross_subject_member(member, data, cfg: Config):
     """Fits one member and writes its probability dump.
 
@@ -86,6 +101,8 @@ def dump_cross_subject_member(member, data, cfg: Config):
         Arrays "subject", "y" and "probs" for the test rows, and
         "val_subject", "val_y" and "val_probs" for the validation rows.
     """
+    if cfg.data.alignment == "riemannian" and member != "riemann":
+        raise ValueError("Riemannian alignment applies to the riemann member only.")
     val_probs, probs = MEMBERS[member](data, cfg)
     dump = {
         "subject": data["subject_test"], "y": data["y_test"], "probs": probs,
@@ -93,7 +110,7 @@ def dump_cross_subject_member(member, data, cfg: Config):
     }
     out_dir = output_dir_for(cfg) / "cross_subject"
     out_dir.mkdir(parents=True, exist_ok=True)
-    np.savez(out_dir / f"predictions_{member}.npz", **dump)
+    np.savez(out_dir / f"predictions_{member}{alignment_suffix(cfg)}.npz", **dump)
     print(f"[{member}] test acc={(probs.argmax(axis=1) == data['y_test']).mean():.3f}, "
           f"val acc={(val_probs.argmax(axis=1) == data['y_val']).mean():.3f}", flush=True)
     return dump

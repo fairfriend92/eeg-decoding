@@ -16,15 +16,28 @@ import argparse
 import numpy as np
 from pyriemann.estimation import Covariances
 from pyriemann.tangentspace import TangentSpace
+from pyriemann.utils.base import invsqrtm
+from pyriemann.utils.mean import mean_covariance
 from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import make_pipeline
 
 from config import Config, add_dataset_cli_args, resolve_config
-from data_loader import get_subject_data, get_subject_validation_data
+from data_loader import alignment_subset, get_subject_data, get_subject_validation_data
 from train import output_dir_for
 
 
-def fit_predict_riemann(X_train, y_train, X_eval):
+def _recenter(covs, subjects, n_trials):
+    """Moves each participant's covariance matrices to be centered at the identity."""
+    out = np.empty_like(covs)
+    for sid in np.unique(subjects):
+        idx = np.flatnonzero(subjects == sid)
+        center = mean_covariance(covs[idx[alignment_subset(len(idx), n_trials)]], metric="riemann")
+        whitener = invsqrtm(center)
+        out[idx] = whitener @ covs[idx] @ whitener.T
+    return out
+
+
+def fit_predict_riemann(X_train, y_train, X_eval, subj_train=None, subj_eval=None, recenter_n_trials=0):
     """Fits the tangent-space classifier and predicts class probabilities.
 
     Parameters
@@ -33,15 +46,28 @@ def fit_predict_riemann(X_train, y_train, X_eval):
         Fitting and evaluation trials.
     y_train : ndarray, shape (n_trials,)
         Fitting labels.
+    subj_train, subj_eval : ndarray, shape (n_trials,), optional
+        Participant id of every trial. When both are given, each
+        participant's covariance matrices are recentered at that
+        participant's own Riemannian mean before the tangent-space
+        projection, using no labels.
+    recenter_n_trials : int
+        Trials per participant the Riemannian mean is estimated from. 0
+        uses every trial.
 
     Returns
     -------
     ndarray, shape (len(X_eval), n_classes)
         Class probabilities.
     """
-    clf = make_pipeline(Covariances(estimator="oas"), TangentSpace(metric="riemann"), LogisticRegression(max_iter=1000))
-    clf.fit(X_train, y_train)
-    return clf.predict_proba(X_eval)
+    cov = Covariances(estimator="oas")
+    covs_train, covs_eval = cov.transform(X_train), cov.transform(X_eval)
+    if subj_train is not None and subj_eval is not None:
+        covs_train = _recenter(covs_train, subj_train, recenter_n_trials)
+        covs_eval = _recenter(covs_eval, subj_eval, recenter_n_trials)
+    clf = make_pipeline(TangentSpace(metric="riemann"), LogisticRegression(max_iter=1000))
+    clf.fit(covs_train, y_train)
+    return clf.predict_proba(covs_eval)
 
 
 def riemann_subject(subject_id, cfg: Config):

@@ -61,7 +61,7 @@ class EEGConformer(nn.Module):
         Number of EEG channels.
     n_times : int
         Number of time samples per epoch. Fixes the classification head's
-        input size.
+        input size unless cfg.pool_tokens is set.
     n_classes : int
         Number of output classes.
     cfg : ConformerConfig
@@ -90,9 +90,11 @@ class EEGConformer(nn.Module):
                 f"n_times={n_times} is too short for kernel_length={cfg.kernel_length} "
                 f"and pool_size={cfg.pool_size}"
             )
+        self.pool_tokens = cfg.pool_tokens
+        head_in = cfg.embed_dim if cfg.pool_tokens else n_tokens * cfg.embed_dim
         self.classifier = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(n_tokens * cfg.embed_dim, 256),
+            nn.Linear(head_in, 256),
             nn.ELU(),
             nn.Dropout(0.5),
             nn.Linear(256, 32),
@@ -118,4 +120,6 @@ class EEGConformer(nn.Module):
         """
         tokens = self.patch_embed(x)
         tokens = self.encoder(tokens)
+        if self.pool_tokens:
+            tokens = tokens.mean(dim=1)
         return self.classifier(tokens)
