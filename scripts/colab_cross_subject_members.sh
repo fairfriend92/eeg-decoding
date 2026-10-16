@@ -10,11 +10,12 @@
 # large client-side ceiling, not an estimate of the run time.
 #
 # Usage:
-#   scripts/colab_cross_subject_members.sh -s SESSION --gpu TYPE --dataset DATASET --members "MEMBER ..." [--config FILE] [--set "KEY=VALUE ..."] [--suffix SUFFIX]
+#   scripts/colab_cross_subject_members.sh -s SESSION --gpu TYPE --dataset DATASET --members "MEMBER ..." [--config FILE] [--set "KEY=VALUE ..."] [--suffix SUFFIX] [--n-folds N]
 #
 # --set passes config overrides through. --suffix is the dump file-name suffix
 # those overrides produce (_ea for data.alignment=euclidean), so the download
-# finds the right files.
+# finds the right files. --n-folds N cross-validates over N test-participant
+# folds in the one session and downloads every fold's dump (_f0 ... _fN-1).
 #
 # Example:
 #   scripts/colab_cross_subject_members.sh -s xsubj --gpu A100 --dataset dreyer2023 --members "patch_transformer"
@@ -28,6 +29,7 @@ MEMBERS=""
 CONFIG=""
 SETS=""
 SUFFIX=""
+N_FOLDS=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -38,6 +40,7 @@ while [[ $# -gt 0 ]]; do
         --config) CONFIG="$2"; shift 2 ;;
         --set) SETS="$2"; shift 2 ;;
         --suffix) SUFFIX="$2"; shift 2 ;;
+        --n-folds) N_FOLDS="$2"; shift 2 ;;
         -h|--help) sed -n '2,21p' "$0"; exit 0 ;;
         *) echo "Unknown argument: $1" >&2; exit 1 ;;
     esac
@@ -74,15 +77,17 @@ echo "import os; os.makedirs('${REMOTE_OUT}', exist_ok=True)" | "$COLAB" exec "$
 SCRATCH="$(mktemp -d)"
 trap 'rm -rf "$SCRATCH"' EXIT
 BOOTSTRAP="${SCRATCH}/bootstrap.py"
-python3 - "$REMOTE_ROOT" "$DRIVE_DATA_DIR" "$DRIVE_ROOT" "$DATASET" "$MEMBERS" "$CONFIG" "$SETS" > "$BOOTSTRAP" <<'PYEOF'
+python3 - "$REMOTE_ROOT" "$DRIVE_DATA_DIR" "$DRIVE_ROOT" "$DATASET" "$MEMBERS" "$CONFIG" "$SETS" "$N_FOLDS" > "$BOOTSTRAP" <<'PYEOF'
 import sys, json
-remote_root, drive_data_dir, drive_root, dataset, members, config, sets = sys.argv[1:8]
+remote_root, drive_data_dir, drive_root, dataset, members, config, sets, n_folds = sys.argv[1:9]
 remote_src = remote_root + '/src'
 args = members.split() + ['--dataset', dataset, '--n-jobs', '2', '--cache-dir', drive_root + '/output/' + dataset]
 if config:
     args += ['--config', remote_root + '/configs/' + config]
 for kv in sets.split():
     args += ['--set', kv]
+if int(n_folds):
+    args += ['--n-folds', n_folds]
 print(f"""import sys, os, time, threading
 os.makedirs({drive_data_dir!r}, exist_ok=True)
 os.environ['MNE_DATA'] = {drive_data_dir!r}
@@ -112,9 +117,13 @@ echo "== running cross_subject_members.py =="
 "$COLAB" exec "${SESSION_ARGS[@]}" -f "$BOOTSTRAP" --timeout 604800
 
 mkdir -p "${REPO_ROOT}/output/${DATASET}/cross_subject"
+FOLD_SUFFIXES=("")
+[[ "$N_FOLDS" -gt 0 ]] && FOLD_SUFFIXES=($(for ((k = 0; k < N_FOLDS; k++)); do echo "_f${k}"; done))
 for member in $MEMBERS; do
-    echo "== downloading predictions_${member}${SUFFIX}.npz =="
-    "$COLAB" download "${SESSION_ARGS[@]}" "${REMOTE_OUT}/cross_subject/predictions_${member}${SUFFIX}.npz" "${REPO_ROOT}/output/${DATASET}/cross_subject/predictions_${member}${SUFFIX}.npz"
+    for fold in "${FOLD_SUFFIXES[@]}"; do
+        echo "== downloading predictions_${member}${SUFFIX}${fold}.npz =="
+        "$COLAB" download "${SESSION_ARGS[@]}" "${REMOTE_OUT}/cross_subject/predictions_${member}${SUFFIX}${fold}.npz" "${REPO_ROOT}/output/${DATASET}/cross_subject/predictions_${member}${SUFFIX}${fold}.npz"
+    done
 done
 
 "$COLAB" stop "${SESSION_ARGS[@]}"

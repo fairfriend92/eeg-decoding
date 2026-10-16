@@ -11,6 +11,7 @@ import threading
 import time
 
 import data_loader  # noqa: F401 (applies MNE_DATA and the download configuration)
+from bids_loader import download_bids
 from datasets import DATASET_PRESETS, MOABB_DATASET_CLASSES
 
 
@@ -48,7 +49,13 @@ def download_dataset(dataset_name, subject_ids=None):
     if dataset_name not in DATASET_PRESETS:
         raise ValueError(f"Unknown dataset '{dataset_name}'. Choices: {sorted(DATASET_PRESETS)}")
 
-    subject_ids = subject_ids or DATASET_PRESETS[dataset_name].subject_ids
+    preset = DATASET_PRESETS[dataset_name]
+    if preset.nemar_id is not None:
+        _start_heartbeat()
+        download_bids(preset)
+        return
+
+    subject_ids = subject_ids or preset.subject_ids
     dataset = MOABB_DATASET_CLASSES[dataset_name]()
     _start_heartbeat()
 

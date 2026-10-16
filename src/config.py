@@ -86,11 +86,20 @@ class DataConfig:
     alignment : str
         Per-participant alignment of the cross-subject split, estimated from
         each participant's own unlabeled trials. "none" leaves the z-scored
-        trials as they are. "euclidean" whitens each participant's trials
+        trials as they are. "causal" replaces the full-trial z-score and
+        whitening with causal_alignment.CausalAlign run over each session's
+        windows in recording order, as a streaming scorer sees them. "euclidean" whitens each participant's trials
         with the inverse square root of their mean trial covariance
         (data_loader.get_cross_subject_data). "riemannian" leaves the trials
         unchanged and recenters each participant's covariance matrices at
         their Riemannian mean inside the tangent-space member only.
+    test_alignment : str, optional
+        Alignment of the test participants alone, when it differs from
+        alignment. Same choices as alignment except "riemannian". None uses
+        alignment. Scores a model fit on one alignment against another.
+    causal_cov_prior_windows : float
+        Identity-covariance prior weight, in windows, of the "causal"
+        alignment (see causal_alignment.CausalAlign).
     alignment_n_trials : int
         Number of trials per participant the alignment statistic is
         estimated from, drawn at random with a fixed seed. 0 uses every
@@ -118,7 +127,15 @@ class DataConfig:
     val_subject_fraction: float = 0.2
     val_subject_seed: int = 33
     alignment: str = "none"
+    test_alignment: str = None
+    causal_cov_prior_windows: float = 1.0
     alignment_n_trials: int = 0
+    nemar_id: str = None
+    nemar_version: str = None
+    cue_labels: list = None
+    notch_freqs: list = None
+    scale: float = 1.0
+    model_overrides: dict = None
 
 
 @dataclass
@@ -358,7 +375,8 @@ class EEGNetConfig:
         Number of pointwise filters in the separable convolution.
     kernel_length : int
         Length of the temporal convolution kernel, in samples. Set to roughly
-        half the sampling rate, so the kernel spans ~0.5s of signal.
+        half the sampling rate, so the kernel spans ~0.5s of signal. A dataset
+        at another rate sets it in its preset's model_overrides.
     dropout : float
         Dropout probability applied after each pooling stage. Sweep found
         dropout in {0.25, 0.5} statistically indistinguishable at this
@@ -456,6 +474,9 @@ def make_config(dataset="bci2a", model=None, overrides=None):
     cfg      = Config()
     cfg.data = copy.deepcopy(DATASET_PRESETS[dataset])
     cfg.cropped = make_cropped_config(cfg.data.resample_freq)
+    # Preset model settings first, so an explicit override still wins.
+    if cfg.data.model_overrides:
+        cfg = apply_overrides(cfg, cfg.data.model_overrides, model_name=model)
 
     if overrides:
         cfg = apply_overrides(cfg, overrides, model_name=model)

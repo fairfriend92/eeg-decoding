@@ -8,6 +8,11 @@ helper and ``sinusoidal_positional_encoding`` function) with
 arguments. Keep the three in sync by hand; nothing enforces it
 automatically.
 
+An optional ``align`` entry in ``weights.pt`` switches on a causal per-stream
+z-score and Euclidean alignment of each window (``CausalAlign``, inlined from
+``src/causal_alignment.py`` by ``build_submission.py``). Without it the model
+sees the raw window.
+
 ``weights.pt`` (built by ``scripts/neuralbench_eval.py --save-checkpoint``,
 packaged by ``build_submission.py --model patch_transformer``) must hold
 ``{"net": ..., "probe": ...}`` state dicts. The ``probe`` is not optional
@@ -21,10 +26,31 @@ model. See ``neuralbench.modules.DownstreamWrapperModel``/``DownstreamWrapper``
 
 import math
 
+import numpy as np
 import torch
 from torch import nn
 
 from benchmark_utils.base_solver import CompetSolver
+
+# BEGIN causal_alignment (build_submission.py inlines src/causal_alignment.py's CausalAlign here)
+# END causal_alignment
+
+
+def _make_aligner(spec):
+    """CausalAlign from the optional ``align`` entry of weights.pt, None when absent.
+
+    The entry is a dict with optional ``mean`` and ``var`` tensors (per-channel
+    training-pool statistics) and the float prior weights ``z_prior_windows``
+    and ``cov_prior_windows``.
+    """
+    if spec is None:
+        return None
+    return CausalAlign(
+        prior_mean=spec["mean"].cpu().numpy() if "mean" in spec else None,
+        prior_var=spec["var"].cpu().numpy() if "var" in spec else None,
+        z_prior_windows=spec.get("z_prior_windows", 0.0),
+        cov_prior_windows=spec.get("cov_prior_windows", 1.0),
+    )
 
 # PatchTransformerConfig defaults (src/config.py), inlined: see module docstring.
 _PATCH_SIZE = 25
@@ -109,12 +135,21 @@ class _ProbedPatchTransformer(nn.Module):
     """PatchTransformer plus the linear probe NeuralBench's downstream wrapper
     trains on top of it (see module docstring)."""
 
-    def __init__(self, n_chans, n_times, n_classes):
+    def __init__(self, n_chans, n_times, n_classes, aligner=None):
         super().__init__()
+        self.aligner = aligner
         self.net = PatchTransformer(n_chans, n_times, n_classes)
         self.probe = nn.Linear(n_classes, n_classes)
 
+    def reset_state(self):
+        """Forgets the stream's running statistics. Called before each stream."""
+        if self.aligner is not None:
+            self.aligner.reset()
+
     def forward(self, x):
+        if self.aligner is not None:
+            # Windows are aligned one at a time, in order, so a batch is the same stream.
+            x = torch.stack([torch.from_numpy(self.aligner(w.detach().cpu().numpy())) for w in x]).to(x.device, x.dtype)
         return self.probe(self.net(x))
 
     @torch.no_grad()
@@ -135,4 +170,5 @@ class Solver(CompetSolver):
         state = torch.load(weights, map_location=meta["device"], weights_only=True)
         model.net.load_state_dict(state["net"])
         model.probe.load_state_dict(state["probe"])
+        model.aligner = _make_aligner(state.get("align"))
         return model.to(meta["device"]).eval()

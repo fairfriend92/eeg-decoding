@@ -4,7 +4,10 @@ Adding a new dataset means adding one entry to each dict below; nothing
 else in the pipeline (config.make_config, data_loader.load_subject/
 split_subject, train.py/evaluate.py/sweep.py) needs to change, as long as
 the dataset is exposed as a MOABB dataset class compatible with
-moabb.paradigms.MotorImagery.
+moabb.paradigms.MotorImagery. A BIDS dataset on NEMAR that MOABB does not
+provide needs only a DATASET_PRESETS entry that sets nemar_id (see
+bids_loader), and carries its own filtering, rate, window, scale and
+model_overrides there.
 
 Subject counts/ids and n_train_sessions for stieger2021 are provisional
 defaults based on the dataset's published documentation, not yet
@@ -85,6 +88,36 @@ DATASET_PRESETS = {
         split_strategy="fixed_sessions",
         train_session="0",    # unverified placeholder, see module docstring
         test_session="1",     # unverified placeholder, see module docstring
+    ),
+    # Input format of the Codabench Track 02 warm-up: 0.1-75 Hz after a 50/60 Hz
+    # notch, 120 Hz, microvolts, 4 s starting 1 s after the cue, 41 EEG channels.
+    "proteus": DataConfig(
+        dataset="proteus",
+        n_classes=3,
+        n_channels=41,
+        subject_ids=list(range(1, 11)),
+        l_freq=0.1,
+        h_freq=75.0,
+        notch_freqs=[50.0, 60.0],
+        tmin=1.0,
+        tmax=5.0,
+        resample_freq=120.0,
+        scale=1e6,
+        nemar_id="nm000290",
+        nemar_version="1.0.0",
+        cue_labels=["mi", "sub", "word"],
+        # Sample counts that are 0.5 s (EEGNet kernel) and 100/300/60 ms (Conformer, patches) at 120 Hz.
+        model_overrides={
+            "eegnet.kernel_length": 60,
+            "conformer.kernel_length_ms": 100.0,
+            "conformer.pool_size_ms": 300.0,
+            "conformer.pool_stride_ms": 60.0,
+            "patch_transformer.patch_size_ms": 100.0,
+        },
+        split_strategy="within_session_holdout",
+        holdout_fraction=0.2,
+        # Seeded 20% participant draw (random_state 33) as the cross-subject test set.
+        test_subject_ids=[4, 9],
     ),
     "graz_brainhero": DataConfig(
         dataset="graz_brainhero",

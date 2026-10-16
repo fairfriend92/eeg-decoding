@@ -36,6 +36,8 @@ moabb.set_download_provider("upstream")
 
 from moabb.paradigms import MotorImagery
 
+from bids_loader import bids_session_labels, load_bids_subject
+from causal_alignment import causal_align_stream
 from config import DATA_DIR, OUTPUT_DIR, DataConfig
 from datasets import MOABB_DATASET_CLASSES
 import moabb_downloads  # noqa: F401 (applies the download configuration at import)
@@ -48,6 +50,9 @@ os.environ.setdefault("MNE_DATA", str(DATA_DIR))
 
 def load_subject(subject_id, cfg: DataConfig):
     """Loads and epochs all trials for a single subject.
+
+    Datasets with cfg.nemar_id set are read from their BIDS tree (see
+    bids_loader.load_bids_subject), the rest through MOABB.
 
     Parameters
     ----------
@@ -65,6 +70,9 @@ def load_subject(subject_id, cfg: DataConfig):
     sessions : ndarray, shape (n_trials,)
         Session label per trial.
     """
+    if cfg.nemar_id is not None:
+        return load_bids_subject(subject_id, cfg)
+
     dataset = MOABB_DATASET_CLASSES[cfg.dataset]()
     paradigm = MotorImagery(
         n_classes=cfg.n_classes,
@@ -335,6 +343,8 @@ def _load_subject_cached(subject_id, cfg: DataConfig, cache_dir=None):
     changed filter band or window never reads a stale file.
     """
     tag = f"{cfg.l_freq:g}-{cfg.h_freq:g}Hz_{cfg.tmin:g}-{cfg.tmax:g}s_{cfg.resample_freq:g}Hz"
+    if cfg.nemar_id is not None:
+        tag += f"_notch{'-'.join(f'{f:g}' for f in cfg.notch_freqs or [])}_scale{cfg.scale:g}"
     path = (cache_dir or OUTPUT_DIR / cfg.dataset / "epochs_cache") / tag / f"subject{subject_id}.npz"
     if path.exists():
         cached = np.load(path)
@@ -387,6 +397,58 @@ def euclidean_align(X, n_trials=0):
     return np.matmul(whitener.astype(np.float32), X)
 
 
+def _stream_labels(subject_id, n_trials, cfg: DataConfig):
+    """Session label of each of a participant's trials, one stream per session.
+
+    A dataset read from BIDS has real sessions. Any other is a single stream
+    per participant.
+    """
+    if cfg.nemar_id is None:
+        return np.zeros(n_trials, dtype=int)
+    sessions = bids_session_labels(subject_id, cfg)
+    if len(sessions) != n_trials:
+        raise ValueError(f"Subject {subject_id} has {n_trials} trials but {len(sessions)} session labels.")
+    return sessions
+
+
+def _align_participant(X, sessions, alignment, cfg: DataConfig):
+    """Z-scores and optionally aligns one participant's raw trials.
+
+    "causal" aligns each session separately, trials in recording order, the
+    way a streaming scorer resets between sessions. The others use the
+    participant's full-trial statistics.
+    """
+    if alignment == "causal":
+        out = np.empty(X.shape, dtype=np.float32)
+        for session in np.unique(sessions):
+            mask = sessions == session
+            out[mask] = causal_align_stream(X[mask], cov_prior_windows=cfg.causal_cov_prior_windows)
+        return out
+    mean, std = X.mean(axis=(0, 2), keepdims=True), X.std(axis=(0, 2), keepdims=True)
+    X = (X - mean) / (std + 1e-8)
+    return euclidean_align(X, cfg.alignment_n_trials) if alignment == "euclidean" else X
+
+
+def participant_folds(cfg: DataConfig, n_folds):
+    """Partitions the participants into disjoint test folds.
+
+    Parameters
+    ----------
+    cfg : DataConfig
+        Provides subject_ids and val_subject_seed, which seeds the shuffle.
+    n_folds : int
+        Number of folds. Each participant is in exactly one, and the sizes
+        differ by at most one.
+
+    Returns
+    -------
+    list of list of int
+        Sorted participant ids of each fold, usable as test_subject_ids.
+    """
+    shuffled = np.random.default_rng(cfg.val_subject_seed).permutation(cfg.subject_ids)
+    return [sorted(int(s) for s in fold) for fold in np.array_split(shuffled, n_folds)]
+
+
 def get_cross_subject_data(cfg: DataConfig, n_jobs=6, cache_dir=None):
     """Loads every participant and splits them whole into fit, validation and test.
 
@@ -418,10 +480,12 @@ def get_cross_subject_data(cfg: DataConfig, n_jobs=6, cache_dir=None):
     ------
     ValueError
         If the dataset has no cross-subject test participants, or
-        cfg.alignment is not "none", "euclidean" or "riemannian".
+        cfg.alignment or cfg.test_alignment is not a valid choice.
     """
-    if cfg.alignment not in ("none", "euclidean", "riemannian"):
-        raise ValueError(f"Unknown alignment '{cfg.alignment}'. Choices: none, euclidean, riemannian")
+    if cfg.alignment not in ("none", "euclidean", "riemannian", "causal"):
+        raise ValueError(f"Unknown alignment '{cfg.alignment}'. Choices: none, euclidean, riemannian, causal")
+    if cfg.test_alignment not in (None, "none", "euclidean", "causal"):
+        raise ValueError(f"Unknown test_alignment '{cfg.test_alignment}'. Choices: none, euclidean, causal")
     if cfg.test_subject_ids is None:
         raise ValueError(f"Dataset '{cfg.dataset}' defines no test_subject_ids.")
     train_ids = [s for s in cfg.subject_ids if s not in cfg.test_subject_ids]
@@ -433,17 +497,17 @@ def get_cross_subject_data(cfg: DataConfig, n_jobs=6, cache_dir=None):
     get_reusable_executor().shutdown(wait=True)
     data = {}
     for part, ids in parts.items():
-        X_parts, y_parts, subject_parts = [], [], []
+        X_parts, y_parts, subject_parts, session_parts = [], [], [], []
+        alignment = cfg.test_alignment if part == "test" and cfg.test_alignment else cfg.alignment
         for sid in ids:
             X, y = loaded.pop(sid)
-            mean, std = X.mean(axis=(0, 2), keepdims=True), X.std(axis=(0, 2), keepdims=True)
-            X = (X - mean) / (std + 1e-8)
-            if cfg.alignment == "euclidean":
-                X = euclidean_align(X, cfg.alignment_n_trials)
-            X_parts.append(X)
+            sessions = _stream_labels(sid, len(y), cfg)
+            X_parts.append(_align_participant(X, sessions, alignment, cfg))
             y_parts.append(y)
             subject_parts.append(np.full(len(y), sid))
+            session_parts.append(sessions.astype(str))
         data[f"X_{part}"] = np.concatenate(X_parts)
         data[f"y_{part}"] = np.concatenate(y_parts)
         data[f"subject_{part}"] = np.concatenate(subject_parts)
+        data[f"session_{part}"] = np.concatenate(session_parts)
     return data

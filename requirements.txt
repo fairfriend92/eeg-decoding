@@ -7,3 +7,4 @@ matplotlib>=3.8
 pyyaml>=6.0
 pyriemann>=0.6
 braindecode[hug]>=1.3
+nemar-py>=0.3.1

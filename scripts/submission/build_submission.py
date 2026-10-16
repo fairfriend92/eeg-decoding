@@ -15,8 +15,31 @@ CHECKPOINT is the file written by
 """
 
 import argparse
+import re
 import zipfile
 from pathlib import Path
+
+CAUSAL_ALIGNMENT_SOURCE = Path(__file__).resolve().parents[2] / "src" / "causal_alignment.py"
+CAUSAL_ALIGNMENT_MARKERS = re.compile(r"# BEGIN causal_alignment.*?\n# END causal_alignment", re.DOTALL)
+
+
+def inline_causal_alignment(submission_source):
+    """Replaces the causal_alignment marker block with src/causal_alignment.py's code.
+
+    Parameters
+    ----------
+    submission_source : str
+        Text of a {model}_submission.py file.
+
+    Returns
+    -------
+    str
+        The same text with CausalAlign and causal_align_stream defined in place
+        of the markers. The module docstring and numpy import are dropped, the
+        submission file imports numpy itself.
+    """
+    code = CAUSAL_ALIGNMENT_SOURCE.read_text().split("import numpy as np\n", 1)[1].strip()
+    return CAUSAL_ALIGNMENT_MARKERS.sub(lambda _: code, submission_source)
 
 
 def main():
@@ -40,7 +63,7 @@ def main():
 
     submission_py = Path(__file__).parent / f"{args.model}_submission.py"
     with zipfile.ZipFile(args.output, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.write(submission_py, "submission.py")
+        zf.writestr("submission.py", inline_causal_alignment(submission_py.read_text()))
         zf.write(args.checkpoint, "weights.pt")
 
     print(f"wrote {args.output}")
