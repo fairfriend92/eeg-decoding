@@ -10,7 +10,7 @@ Usage
 -----
     python scripts/submission/build_submission.py CHECKPOINT [--model {eegnet,patch_transformer,conformer}] [-o OUTPUT]
 
-CHECKPOINT is the file written by
+CHECKPOINT is the file written by ``src/export_submission.py`` or by
 ``scripts/neuralbench_eval.py --save-checkpoint``.
 """
 
@@ -46,7 +46,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "checkpoint", type=Path,
-        help="net+probe state dict from scripts/neuralbench_eval.py --save-checkpoint",
+        help="weights file from src/export_submission.py or scripts/neuralbench_eval.py --save-checkpoint",
     )
     parser.add_argument(
         "--model", choices=["eegnet", "patch_transformer"], default="eegnet",

@@ -13,10 +13,7 @@ Subject counts/ids and n_train_sessions for stieger2021 are provisional
 defaults based on the dataset's published documentation, not yet
 confirmed against the actual downloaded data. That dataset is ~399GB, so
 confirming firsthand is deferred until it's actually needed. See the
-project's plan notes. graz_brainhero is not yet released; its entry
-exists so it already appears as a --dataset choice and its preset can be
-filled in without touching any other file once real data/class ids are
-known.
+project's plan notes.
 
 scherer2015's train_session/test_session values ("0"/"1") are confirmed
 against real downloaded data: a live run loaded both sessions for all 9
@@ -28,21 +25,11 @@ from moabb.datasets import BNCI2014_001, BNCI2015_004, Dreyer2023, Stieger2021
 from config import DataConfig
 
 
-def _graz_brainhero_not_released(*args, **kwargs):
-    raise NotImplementedError(
-        "Graz+BrainHero data has not been released yet (NeurIPS EEG/EMG "
-        "Foundation Challenge 2026, Track 2). Once released, register its "
-        "MOABB dataset class here, or a direct mne-bids loader if MOABB "
-        "does not add one, and fill in DATASET_PRESETS['graz_brainhero']."
-    )
-
-
 MOABB_DATASET_CLASSES = {
     "bci2a":          BNCI2014_001,
     "dreyer2023":     Dreyer2023,
     "stieger2021":    Stieger2021,
     "scherer2015":    BNCI2015_004,
-    "graz_brainhero": _graz_brainhero_not_released,
 }
 
 
@@ -118,14 +105,5 @@ DATASET_PRESETS = {
         holdout_fraction=0.2,
         # Seeded 20% participant draw (random_state 33) as the cross-subject test set.
         test_subject_ids=[4, 9],
-    ),
-    "graz_brainhero": DataConfig(
-        dataset="graz_brainhero",
-        n_classes=3,
-        n_channels=43,
-        subject_ids=[],
-        resample_freq=250.0,
-        split_strategy="session_index",
-        n_train_sessions=3,
     ),
 }

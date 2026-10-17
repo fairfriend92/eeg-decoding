@@ -13,14 +13,20 @@ z-score and Euclidean alignment of each window (``CausalAlign``, inlined from
 ``src/causal_alignment.py`` by ``build_submission.py``). Without it the model
 sees the raw window.
 
-``weights.pt`` (built by ``scripts/neuralbench_eval.py --save-checkpoint``,
-packaged by ``build_submission.py --model patch_transformer``) must hold
-``{"net": ..., "probe": ...}`` state dicts. The ``probe`` is not optional
-decoration: NeuralBench's ``finetune_flatten`` downstream wrapper (the one
-``scripts/neuralbench_eval.py`` trains through) adds a trainable
-``nn.Linear(n_classes, n_classes)`` on top of the backbone's own output and
-trains both together, so predictions without it do not match the trained
-model. See ``neuralbench.modules.DownstreamWrapperModel``/``DownstreamWrapper``
+``weights.pt`` is packaged by ``build_submission.py --model patch_transformer``
+and holds a ``net`` state dict. Two writers produce it.
+
+``src/export_submission.py`` (this project's pipeline) adds an ``arch`` entry
+with the ``patch_size`` and ``patch_stride`` in samples, and an ``align``
+entry. It has no ``probe``.
+
+``scripts/neuralbench_eval.py --save-checkpoint`` adds a ``probe`` state dict
+and no ``arch`` (the module defaults below apply). The ``probe`` is not
+optional decoration there: NeuralBench's ``finetune_flatten`` downstream
+wrapper adds a trainable ``nn.Linear(n_classes, n_classes)`` on top of the
+backbone's own output and trains both together, so predictions without it do
+not match the trained model. See
+``neuralbench.modules.DownstreamWrapperModel``/``DownstreamWrapper``
 (``probe_config="linear"`` in ``neuralbench/defaults/downstream_wrappers.yaml``).
 """
 
@@ -105,10 +111,10 @@ class PatchTransformer(nn.Module):
     full docstring and rationale.
     """
 
-    def __init__(self, n_channels, n_times, n_classes):
+    def __init__(self, n_channels, n_times, n_classes, patch_size=_PATCH_SIZE, patch_stride=_PATCH_STRIDE):
         super().__init__()
 
-        self.patch_embed = PatchEmbedding(n_channels, _EMBED_DIM, _PATCH_SIZE, _PATCH_STRIDE)
+        self.patch_embed = PatchEmbedding(n_channels, _EMBED_DIM, patch_size, patch_stride)
 
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=_EMBED_DIM,
@@ -132,14 +138,14 @@ class PatchTransformer(nn.Module):
 
 
 class _ProbedPatchTransformer(nn.Module):
-    """PatchTransformer plus the linear probe NeuralBench's downstream wrapper
-    trains on top of it (see module docstring)."""
+    """PatchTransformer plus, when the checkpoint has one, the linear probe
+    NeuralBench's downstream wrapper trains on top of it (see module docstring)."""
 
-    def __init__(self, n_chans, n_times, n_classes, aligner=None):
+    def __init__(self, n_chans, n_times, n_classes, aligner=None, patch_size=_PATCH_SIZE, patch_stride=_PATCH_STRIDE, probe=True):
         super().__init__()
         self.aligner = aligner
-        self.net = PatchTransformer(n_chans, n_times, n_classes)
-        self.probe = nn.Linear(n_classes, n_classes)
+        self.net = PatchTransformer(n_chans, n_times, n_classes, patch_size, patch_stride)
+        self.probe = nn.Linear(n_classes, n_classes) if probe else nn.Identity()
 
     def reset_state(self):
         """Forgets the stream's running statistics. Called before each stream."""
@@ -163,12 +169,16 @@ class Solver(CompetSolver):
     name = "OursPatchTransformer"
 
     def load_model(self, meta):
-        model = _ProbedPatchTransformer(
-            n_chans=meta["n_chans"], n_times=meta["n_times"], n_classes=meta["n_classes"],
-        )
         weights = meta["submission_dir"] / "weights.pt"
         state = torch.load(weights, map_location=meta["device"], weights_only=True)
+        arch = state.get("arch", {})
+        model = _ProbedPatchTransformer(
+            n_chans=meta["n_chans"], n_times=meta["n_times"], n_classes=meta["n_classes"],
+            patch_size=arch.get("patch_size", _PATCH_SIZE), patch_stride=arch.get("patch_stride", _PATCH_STRIDE),
+            probe="probe" in state,
+        )
         model.net.load_state_dict(state["net"])
-        model.probe.load_state_dict(state["probe"])
+        if "probe" in state:
+            model.probe.load_state_dict(state["probe"])
         model.aligner = _make_aligner(state.get("align"))
         return model.to(meta["device"]).eval()

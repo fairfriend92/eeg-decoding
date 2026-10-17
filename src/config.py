@@ -617,8 +617,7 @@ def add_dataset_cli_args(parser):
     parser.add_argument(
         "--dataset", default="bci2a",
         help="Dataset to use (default: bci2a). See datasets.DATASET_PRESETS for choices "
-             "(currently bci2a, dreyer2023, stieger2021, scherer2015; graz_brainhero is "
-             "registered but not yet released).",
+             "(currently bci2a, dreyer2023, stieger2021, scherer2015, proteus).",
     )
     parser.add_argument(
         "--config", type=Path, default=None,

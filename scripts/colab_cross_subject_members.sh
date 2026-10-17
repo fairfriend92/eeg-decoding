@@ -10,12 +10,21 @@
 # large client-side ceiling, not an estimate of the run time.
 #
 # Usage:
-#   scripts/colab_cross_subject_members.sh -s SESSION --gpu TYPE --dataset DATASET --members "MEMBER ..." [--config FILE] [--set "KEY=VALUE ..."] [--suffix SUFFIX] [--n-folds N]
+#   scripts/colab_cross_subject_members.sh -s SESSION --gpu TYPE --dataset DATASET --members "MEMBER ..." [--config FILE] [--set "KEY=VALUE ..."] [--suffix SUFFIX] [--n-folds N] [--kfold K] [--early-stop-all] [--ensemble] [--exclude "ID ..."] [--tag TAG]
 #
 # --set passes config overrides through. --suffix is the dump file-name suffix
 # those overrides produce (_ea for data.alignment=euclidean), so the download
 # finds the right files. --n-folds N cross-validates over N test-participant
 # folds in the one session and downloads every fold's dump (_f0 ... _fN-1).
+# --kfold K fits a participant-grouped K-fold ensemble per member instead of
+# the single refit, and downloads predictions_MEMBER<suffix>_kfoldK<fold>.npz.
+# --early-stop-all fits each member on fitting plus validation participants with
+# early stopping instead, and downloads predictions_MEMBER<suffix>_esall<fold>.npz.
+# Without --ensemble the single dump's epoch count comes from every training
+# participant's windows. --ensemble keeps the ensemble harness layout (epoch
+# count from the fitting participants, validation probabilities in the dump).
+# --exclude leaves participants out of the pool entirely. --tag is extra
+# file-name text before the fold index, which the download then expects.
 #
 # Example:
 #   scripts/colab_cross_subject_members.sh -s xsubj --gpu A100 --dataset dreyer2023 --members "patch_transformer"
@@ -30,6 +39,11 @@ CONFIG=""
 SETS=""
 SUFFIX=""
 N_FOLDS=0
+KFOLD=0
+ES_ALL=0
+ENSEMBLE=0
+EXCLUDE=""
+TAG=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -41,7 +55,12 @@ while [[ $# -gt 0 ]]; do
         --set) SETS="$2"; shift 2 ;;
         --suffix) SUFFIX="$2"; shift 2 ;;
         --n-folds) N_FOLDS="$2"; shift 2 ;;
-        -h|--help) sed -n '2,21p' "$0"; exit 0 ;;
+        --kfold) KFOLD="$2"; shift 2 ;;
+        --early-stop-all) ES_ALL=1; shift ;;
+        --ensemble) ENSEMBLE=1; shift ;;
+        --exclude) EXCLUDE="$2"; shift 2 ;;
+        --tag) TAG="$2"; shift 2 ;;
+        -h|--help) sed -n '2,31p' "$0"; exit 0 ;;
         *) echo "Unknown argument: $1" >&2; exit 1 ;;
     esac
 done
@@ -77,9 +96,9 @@ echo "import os; os.makedirs('${REMOTE_OUT}', exist_ok=True)" | "$COLAB" exec "$
 SCRATCH="$(mktemp -d)"
 trap 'rm -rf "$SCRATCH"' EXIT
 BOOTSTRAP="${SCRATCH}/bootstrap.py"
-python3 - "$REMOTE_ROOT" "$DRIVE_DATA_DIR" "$DRIVE_ROOT" "$DATASET" "$MEMBERS" "$CONFIG" "$SETS" "$N_FOLDS" > "$BOOTSTRAP" <<'PYEOF'
+python3 - "$REMOTE_ROOT" "$DRIVE_DATA_DIR" "$DRIVE_ROOT" "$DATASET" "$MEMBERS" "$CONFIG" "$SETS" "$N_FOLDS" "$KFOLD" "$ES_ALL" "$ENSEMBLE" "$EXCLUDE" "$TAG" > "$BOOTSTRAP" <<'PYEOF'
 import sys, json
-remote_root, drive_data_dir, drive_root, dataset, members, config, sets, n_folds = sys.argv[1:9]
+remote_root, drive_data_dir, drive_root, dataset, members, config, sets, n_folds, kfold, es_all, ensemble, exclude, tag = sys.argv[1:14]
 remote_src = remote_root + '/src'
 args = members.split() + ['--dataset', dataset, '--n-jobs', '2', '--cache-dir', drive_root + '/output/' + dataset]
 if config:
@@ -88,6 +107,16 @@ for kv in sets.split():
     args += ['--set', kv]
 if int(n_folds):
     args += ['--n-folds', n_folds]
+if int(kfold):
+    args += ['--kfold', kfold]
+if int(es_all):
+    args += ['--early-stop-all']
+if int(ensemble):
+    args += ['--ensemble']
+if exclude.split():
+    args += ['--exclude-subjects'] + exclude.split()
+if tag:
+    args += ['--tag', tag]
 print(f"""import sys, os, time, threading
 os.makedirs({drive_data_dir!r}, exist_ok=True)
 os.environ['MNE_DATA'] = {drive_data_dir!r}
@@ -117,12 +146,15 @@ echo "== running cross_subject_members.py =="
 "$COLAB" exec "${SESSION_ARGS[@]}" -f "$BOOTSTRAP" --timeout 604800
 
 mkdir -p "${REPO_ROOT}/output/${DATASET}/cross_subject"
+KFOLD_TAG=""
+[[ "$KFOLD" -gt 0 ]] && KFOLD_TAG="_kfold${KFOLD}"
+[[ "$ES_ALL" -eq 1 ]] && KFOLD_TAG="_esall"
 FOLD_SUFFIXES=("")
 [[ "$N_FOLDS" -gt 0 ]] && FOLD_SUFFIXES=($(for ((k = 0; k < N_FOLDS; k++)); do echo "_f${k}"; done))
 for member in $MEMBERS; do
     for fold in "${FOLD_SUFFIXES[@]}"; do
-        echo "== downloading predictions_${member}${SUFFIX}${fold}.npz =="
-        "$COLAB" download "${SESSION_ARGS[@]}" "${REMOTE_OUT}/cross_subject/predictions_${member}${SUFFIX}${fold}.npz" "${REPO_ROOT}/output/${DATASET}/cross_subject/predictions_${member}${SUFFIX}${fold}.npz"
+        echo "== downloading predictions_${member}${SUFFIX}${KFOLD_TAG}${TAG}${fold}.npz =="
+        "$COLAB" download "${SESSION_ARGS[@]}" "${REMOTE_OUT}/cross_subject/predictions_${member}${SUFFIX}${KFOLD_TAG}${TAG}${fold}.npz" "${REPO_ROOT}/output/${DATASET}/cross_subject/predictions_${member}${SUFFIX}${KFOLD_TAG}${TAG}${fold}.npz"
     done
 done
 

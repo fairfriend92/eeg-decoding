@@ -452,7 +452,8 @@ def participant_folds(cfg: DataConfig, n_folds):
 def get_cross_subject_data(cfg: DataConfig, n_jobs=6, cache_dir=None):
     """Loads every participant and splits them whole into fit, validation and test.
 
-    Test participants are cfg.test_subject_ids. A fraction of the remaining
+    Test participants are cfg.test_subject_ids, which may be empty (the result
+    then has no "test" arrays). A fraction of the remaining
     participants, drawn with cfg.val_subject_seed, forms the validation set
     and the rest the fitting set. Each participant's trials are z-scored per
     channel with that participant's own statistics, then optionally
@@ -472,7 +473,7 @@ def get_cross_subject_data(cfg: DataConfig, n_jobs=6, cache_dir=None):
     Returns
     -------
     dict
-        For each part in "fit", "val" and "test", the arrays "X_{part}",
+        For each non-empty part in "fit", "val" and "test", the arrays "X_{part}",
         "y_{part}" and "subject_{part}" (participant id of every trial),
         concatenated in participant order.
 
@@ -497,6 +498,8 @@ def get_cross_subject_data(cfg: DataConfig, n_jobs=6, cache_dir=None):
     get_reusable_executor().shutdown(wait=True)
     data = {}
     for part, ids in parts.items():
+        if not ids:
+            continue
         X_parts, y_parts, subject_parts, session_parts = [], [], [], []
         alignment = cfg.test_alignment if part == "test" and cfg.test_alignment else cfg.alignment
         for sid in ids:

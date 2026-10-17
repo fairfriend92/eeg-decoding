@@ -20,13 +20,21 @@ directly comparable to the Dreyer2023 numbers in [README.md](README.md), includi
 cross-subject results on the same 21 participants, which use this project's own
 preprocessing.
 
-### Graz+BrainHero (not yet released)
+### PROTEUS (Codabench Track 2)
 
-Registered as a placeholder dataset (`graz_brainhero`, raises immediately if
-selected) for the Challenge's Track 2 longitudinal corpus [1]: 3 cued mental
-commands (kinesthetic motor imagery, mental calculation, word association)
-across 6 sessions per participant, evaluating whether a model calibrated on
-early sessions still decodes reliably on later, unseen-day sessions.
+The Challenge's Track 2 corpus [1] (`proteus` preset, NEMAR nm000290): 10
+participants, 14 sessions and 2,655 windows of 41 EEG channels. Each window is
+4 s long at 120 Hz in microvolts, starting 1 s after the cue, and carries one of
+3 cued mental commands (kinesthetic motor imagery, mental subtraction, word
+generation). A session mixes two interfaces, Graz and BrainHero, which the
+Challenge scores as separate contexts. Codabench streams each session of each
+participant one window at a time and ranks by balanced accuracy per participant,
+session and context cell, averaged over cells.
+
+The warm-up phase scores the public cross-subject test participants (4 and 9),
+a 60/20/20 participant split drawn with random state 33. The sealed phase scores
+private recordings of the same acquisition programme: later sessions of
+represented participants and participants absent from the public release.
 
 ## Results
 
@@ -174,8 +182,8 @@ warm-up or sealed phase).
 The patch transformer's headline benchmark numbers above are a 3-seed mean; EEGNet's is
 a single seed, run once to validate the submission pipeline end to end
 rather than to produce a final number, so it is not yet directly
-comparable on variance. The Graz+BrainHero dataset is not yet released;
-its preset is registered but raises immediately if selected. The EEG Conformer
+comparable on variance. The PROTEUS warm-up scores two participants, so
+its scores are indicative only. The EEG Conformer
 [5] has no Codabench submission file yet. Both
 `scripts/submission/eegnet_submission.py` and `patch_transformer_submission.py`,
 plus the checkpoint-saving and packaging path behind them, have been
