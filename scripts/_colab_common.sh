@@ -7,6 +7,20 @@ REMOTE_ROOT="/content/eeg-decoding"
 DRIVE_ROOT="/content/drive/MyDrive/progetti/eeg-decoding"
 DRIVE_DATA_DIR="${DRIVE_ROOT}/data"
 
+# One heartbeat for the whole script, from session creation to the final
+# download: a long silent stretch is suspected to kill the Colab tunnel. It
+# prints to stderr every 30 s and exits on its own once the sourcing script
+# is gone, so it needs no trap (several callers set their own EXIT trap).
+(
+    parent=$$
+    t0=$SECONDS
+    while kill -0 "$parent" 2>/dev/null; do
+        sleep 30
+        echo "[heartbeat] script $((SECONDS - t0))s" >&2
+    done
+) &
+disown
+
 # Ensures a Colab session exists, creating one (with --gpu, if SESSION and
 # GPU are set in the caller's scope) when it does not. Sets SESSION_ARGS.
 #

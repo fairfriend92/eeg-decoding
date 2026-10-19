@@ -10,7 +10,7 @@
 # large client-side ceiling, not an estimate of the run time.
 #
 # Usage:
-#   scripts/colab_cross_subject_members.sh -s SESSION --gpu TYPE --dataset DATASET --members "MEMBER ..." [--config FILE] [--set "KEY=VALUE ..."] [--suffix SUFFIX] [--n-folds N] [--kfold K] [--early-stop-all] [--ensemble] [--exclude "ID ..."] [--tag TAG]
+#   scripts/colab_cross_subject_members.sh -s SESSION --gpu TYPE --dataset DATASET --members "MEMBER ..." [--config FILE] [--set "KEY=VALUE ..."] [--suffix SUFFIX] [--n-folds N] [--kfold K] [--early-stop-all] [--ensemble] [--exclude "ID ..."] [--tag TAG] [--epochs N]
 #
 # --set passes config overrides through. --suffix is the dump file-name suffix
 # those overrides produce (_ea for data.alignment=euclidean), so the download
@@ -25,6 +25,8 @@
 # count from the fitting participants, validation probabilities in the dump).
 # --exclude leaves participants out of the pool entirely. --tag is extra
 # file-name text before the fold index, which the download then expects.
+# --epochs N fixes the epoch count of the neural members' final fit and skips
+# the early-stopped fit that otherwise sets it.
 #
 # Example:
 #   scripts/colab_cross_subject_members.sh -s xsubj --gpu A100 --dataset dreyer2023 --members "patch_transformer"
@@ -44,6 +46,7 @@ ES_ALL=0
 ENSEMBLE=0
 EXCLUDE=""
 TAG=""
+EPOCHS=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -60,7 +63,8 @@ while [[ $# -gt 0 ]]; do
         --ensemble) ENSEMBLE=1; shift ;;
         --exclude) EXCLUDE="$2"; shift 2 ;;
         --tag) TAG="$2"; shift 2 ;;
-        -h|--help) sed -n '2,31p' "$0"; exit 0 ;;
+        --epochs) EPOCHS="$2"; shift 2 ;;
+        -h|--help) sed -n '2,33p' "$0"; exit 0 ;;
         *) echo "Unknown argument: $1" >&2; exit 1 ;;
     esac
 done
@@ -96,9 +100,9 @@ echo "import os; os.makedirs('${REMOTE_OUT}', exist_ok=True)" | "$COLAB" exec "$
 SCRATCH="$(mktemp -d)"
 trap 'rm -rf "$SCRATCH"' EXIT
 BOOTSTRAP="${SCRATCH}/bootstrap.py"
-python3 - "$REMOTE_ROOT" "$DRIVE_DATA_DIR" "$DRIVE_ROOT" "$DATASET" "$MEMBERS" "$CONFIG" "$SETS" "$N_FOLDS" "$KFOLD" "$ES_ALL" "$ENSEMBLE" "$EXCLUDE" "$TAG" > "$BOOTSTRAP" <<'PYEOF'
+python3 - "$REMOTE_ROOT" "$DRIVE_DATA_DIR" "$DRIVE_ROOT" "$DATASET" "$MEMBERS" "$CONFIG" "$SETS" "$N_FOLDS" "$KFOLD" "$ES_ALL" "$ENSEMBLE" "$EXCLUDE" "$TAG" "$EPOCHS" > "$BOOTSTRAP" <<'PYEOF'
 import sys, json
-remote_root, drive_data_dir, drive_root, dataset, members, config, sets, n_folds, kfold, es_all, ensemble, exclude, tag = sys.argv[1:14]
+remote_root, drive_data_dir, drive_root, dataset, members, config, sets, n_folds, kfold, es_all, ensemble, exclude, tag, epochs = sys.argv[1:15]
 remote_src = remote_root + '/src'
 args = members.split() + ['--dataset', dataset, '--n-jobs', '2', '--cache-dir', drive_root + '/output/' + dataset]
 if config:
@@ -117,6 +121,8 @@ if exclude.split():
     args += ['--exclude-subjects'] + exclude.split()
 if tag:
     args += ['--tag', tag]
+if epochs:
+    args += ['--epochs', epochs]
 print(f"""import sys, os, time, threading
 os.makedirs({drive_data_dir!r}, exist_ok=True)
 os.environ['MNE_DATA'] = {drive_data_dir!r}

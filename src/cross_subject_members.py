@@ -57,18 +57,19 @@ def _fbcsp_probs(data, cfg: Config):
     )
 
 
-def _neural_probs(data, cfg: Config, model_name, ensemble):
+def _neural_probs(data, cfg: Config, model_name, ensemble, n_epochs=None):
     X_all = np.concatenate([data["X_fit"], data["X_val"]])
     y_all = np.concatenate([data["y_fit"], data["y_val"]])
     device = torch.device(cfg.train.device if torch.cuda.is_available() else "cpu")
     batch_size = cfg.train.batch_size
 
     if not ensemble:
-        # The epoch count comes from every training participant's windows, so no
-        # participant is set aside. fit() holds out a fifth of them for stopping.
-        _, _, best_epoch = fit(X_all, y_all, model_name, cfg)
-        n_train = len(X_all) - round(len(X_all) * 0.2)
-        n_epochs = compute_matched_epochs([(best_epoch, n_train)], len(X_all), batch_size)
+        if n_epochs is None:
+            # The epoch count comes from every training participant's windows, so no
+            # participant is set aside. fit() holds out a fifth of them for stopping.
+            _, _, best_epoch = fit(X_all, y_all, model_name, cfg)
+            n_train = len(X_all) - round(len(X_all) * 0.2)
+            n_epochs = compute_matched_epochs([(best_epoch, n_train)], len(X_all), batch_size)
         final = fit_full(X_all, y_all, model_name, cfg, n_epochs)
         return None, predict_probs(final, data["X_test"], device, batch_size), None
 
@@ -203,11 +204,11 @@ def dump_kfold_ensemble(member, data, cfg: Config, n_inner, fold=None, tag=""):
 
 
 MEMBERS = {
-    "riemann": lambda data, cfg, ensemble: _riemann_probs(data, cfg),
-    "fbcsp": lambda data, cfg, ensemble: _fbcsp_probs(data, cfg),
-    "eegnet": lambda data, cfg, ensemble: _neural_probs(data, cfg, "eegnet", ensemble),
-    "patch_transformer": lambda data, cfg, ensemble: _neural_probs(data, cfg, "patch_transformer", ensemble),
-    "conformer": lambda data, cfg, ensemble: _neural_probs(data, cfg, "conformer", ensemble),
+    "riemann": lambda data, cfg, ensemble, n_epochs: _riemann_probs(data, cfg),
+    "fbcsp": lambda data, cfg, ensemble, n_epochs: _fbcsp_probs(data, cfg),
+    "eegnet": lambda data, cfg, ensemble, n_epochs: _neural_probs(data, cfg, "eegnet", ensemble, n_epochs),
+    "patch_transformer": lambda data, cfg, ensemble, n_epochs: _neural_probs(data, cfg, "patch_transformer", ensemble, n_epochs),
+    "conformer": lambda data, cfg, ensemble, n_epochs: _neural_probs(data, cfg, "conformer", ensemble, n_epochs),
 }
 
 
@@ -221,7 +222,7 @@ def alignment_suffix(cfg: Config):
     return suffix
 
 
-def dump_cross_subject_member(member, data, cfg: Config, fold=None, ensemble=False, tag=""):
+def dump_cross_subject_member(member, data, cfg: Config, fold=None, ensemble=False, tag="", n_epochs=None):
     """Fits one member and writes its probability dump.
 
     Parameters
@@ -243,6 +244,9 @@ def dump_cross_subject_member(member, data, cfg: Config, fold=None, ensemble=Fal
         arrays only.
     tag : str
         Extra file-name text placed before the fold index.
+    n_epochs : int, optional
+        Fixed epoch count of a neural member's final fit, skipping the
+        early-stopped fit that otherwise sets it. Ignored with ensemble.
 
     Returns
     -------
@@ -254,7 +258,7 @@ def dump_cross_subject_member(member, data, cfg: Config, fold=None, ensemble=Fal
     """
     if cfg.data.alignment == "riemannian" and member != "riemann":
         raise ValueError("Riemannian alignment applies to the riemann member only.")
-    val_probs, probs, probs_fit = MEMBERS[member](data, cfg, ensemble)
+    val_probs, probs, probs_fit = MEMBERS[member](data, cfg, ensemble, n_epochs)
     dump = {"subject": data["subject_test"], "y": data["y_test"], "probs": probs, "session": data["session_test"]}
     if val_probs is not None:
         dump.update({
@@ -279,6 +283,7 @@ if __name__ == "__main__":
     parser.add_argument("--early-stop-all", action="store_true", help="Write an early-stopped fit on fitting plus validation participants instead of the single refit dump. Neural members only.")
     parser.add_argument("--ensemble", action="store_true", help="Ensemble harness layout of the single dump: neural epoch counts come from the fitting participants only and the dump carries validation probabilities.")
     parser.add_argument("--exclude-subjects", type=int, nargs="*", default=[], help="Participants left out of the pool entirely, neither trained on nor tested.")
+    parser.add_argument("--epochs", type=int, default=None, help="Fixed epoch count of the neural members' final fit, skipping the early-stopped fit that sets it. Ignored with --ensemble.")
     parser.add_argument("--tag", default="", help="Extra dump file-name text placed before the fold index.")
     add_dataset_cli_args(parser)
     args = parser.parse_args()
@@ -296,4 +301,4 @@ if __name__ == "__main__":
             elif args.kfold:
                 dump_kfold_ensemble(name, data, fold_cfg, args.kfold, fold=k if args.n_folds else None, tag=args.tag)
             else:
-                dump_cross_subject_member(name, data, fold_cfg, fold=k if args.n_folds else None, ensemble=args.ensemble, tag=args.tag)
+                dump_cross_subject_member(name, data, fold_cfg, fold=k if args.n_folds else None, ensemble=args.ensemble, tag=args.tag, n_epochs=args.epochs)

@@ -8,7 +8,10 @@
 # estimate of the run time.
 #
 # Usage:
-#   scripts/colab_export_submission.sh -s SESSION --gpu TYPE --dataset DATASET [--config FILE] [--set "KEY=VALUE ..."] [--all-participants]
+#   scripts/colab_export_submission.sh -s SESSION --gpu TYPE --dataset DATASET [--config FILE] [--set "KEY=VALUE ..."] [--epochs N] [--all-participants]
+#
+# --epochs N fixes the epoch count of the final fit and skips the early-stopped
+# fit that otherwise sets it.
 #
 # --all-participants fits on every participant (sealed phase) and names the
 # file weights_all_participants.pt. Without it the preset's test participants
@@ -24,6 +27,7 @@ GPU=""
 DATASET=""
 CONFIG=""
 SETS=""
+EPOCHS=""
 ALL=0
 
 while [[ $# -gt 0 ]]; do
@@ -33,8 +37,9 @@ while [[ $# -gt 0 ]]; do
         --dataset) DATASET="$2"; shift 2 ;;
         --config) CONFIG="$2"; shift 2 ;;
         --set) SETS="$2"; shift 2 ;;
+        --epochs) EPOCHS="$2"; shift 2 ;;
         --all-participants) ALL=1; shift ;;
-        -h|--help) sed -n '2,18p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,21p' "$0"; exit 0 ;;
         *) echo "Unknown argument: $1" >&2; exit 1 ;;
     esac
 done
@@ -70,9 +75,9 @@ echo "import os; os.makedirs('${REMOTE_OUT}', exist_ok=True)" | "$COLAB" exec "$
 SCRATCH="$(mktemp -d)"
 trap 'rm -rf "$SCRATCH"' EXIT
 BOOTSTRAP="${SCRATCH}/bootstrap.py"
-python3 - "$REMOTE_ROOT" "$DRIVE_DATA_DIR" "$DRIVE_ROOT" "$DATASET" "$CONFIG" "$SETS" "$ALL" > "$BOOTSTRAP" <<'PYEOF'
+python3 - "$REMOTE_ROOT" "$DRIVE_DATA_DIR" "$DRIVE_ROOT" "$DATASET" "$CONFIG" "$SETS" "$ALL" "$EPOCHS" > "$BOOTSTRAP" <<'PYEOF'
 import sys, json
-remote_root, drive_data_dir, drive_root, dataset, config, sets, all_participants = sys.argv[1:8]
+remote_root, drive_data_dir, drive_root, dataset, config, sets, all_participants, epochs = sys.argv[1:9]
 name = 'weights_all_participants.pt' if int(all_participants) else 'weights.pt'
 remote_src = remote_root + '/src'
 args = ['--dataset', dataset, '--n-jobs', '2', '--cache-dir', drive_root + '/output/' + dataset, '--out', remote_root + '/output/' + dataset + '/submission/' + name]
@@ -80,6 +85,8 @@ if int(all_participants):
     args += ['--all-participants']
 if config:
     args += ['--config', remote_root + '/configs/' + config]
+if epochs:
+    args += ['--epochs', epochs]
 for kv in sets.split():
     args += ['--set', kv]
 print(f"""import sys, os, time, threading

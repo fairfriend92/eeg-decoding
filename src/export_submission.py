@@ -28,7 +28,7 @@ from data_loader import get_cross_subject_data
 from train import compute_matched_epochs, fit, fit_full, predict_probs
 
 
-def export_patch_transformer(data, cfg: Config, path):
+def export_patch_transformer(data, cfg: Config, path, n_epochs=None):
     """Fits the patch transformer on fitting plus validation participants and saves it.
 
     Parameters
@@ -41,6 +41,9 @@ def export_patch_transformer(data, cfg: Config, path):
         fit alignment the streamed causal alignment is scored against.
     path : Path
         Destination of the checkpoint, written with torch.save.
+    n_epochs : int, optional
+        Epochs of the final fit. When None, the count comes from an early-stopped
+        fit on the same windows, step-matched to the full set.
 
     Returns
     -------
@@ -62,11 +65,12 @@ def export_patch_transformer(data, cfg: Config, path):
     X_all = np.concatenate([data["X_fit"], data["X_val"]])
     y_all = np.concatenate([data["y_fit"], data["y_val"]])
 
-    # fit() holds out a fifth of the windows for early stopping, so the epoch
-    # budget is matched on the windows it actually trained on.
-    _, _, best_epoch = fit(X_all, y_all, "patch_transformer", cfg)
-    n_train = len(X_all) - round(len(X_all) * 0.2)
-    n_epochs = compute_matched_epochs([(best_epoch, n_train)], len(X_all), cfg.train.batch_size)
+    if n_epochs is None:
+        # fit() holds out a fifth of the windows for early stopping, so the epoch
+        # budget is matched on the windows it actually trained on.
+        _, _, best_epoch = fit(X_all, y_all, "patch_transformer", cfg)
+        n_train = len(X_all) - round(len(X_all) * 0.2)
+        n_epochs = compute_matched_epochs([(best_epoch, n_train)], len(X_all), cfg.train.batch_size)
     model = fit_full(X_all, y_all, "patch_transformer", cfg, n_epochs)
 
     patch = cfg.patch_transformer
@@ -97,6 +101,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", type=Path, required=True, help="Destination of the weights file.")
     parser.add_argument("--all-participants", action="store_true", help="Fit on every participant, leaving no test participants. For the sealed phase.")
+    parser.add_argument("--epochs", type=int, default=None, help="Epochs of the final fit. Skips the early-stopped fit that otherwise sets the count.")
     parser.add_argument("--n-jobs", type=int, default=6, help="Workers epoching participants missing from the cache.")
     parser.add_argument("--cache-dir", type=Path, default=None, help="Persistent directory for the epoch cache.")
     add_dataset_cli_args(parser)
@@ -106,4 +111,4 @@ if __name__ == "__main__":
     if args.all_participants:
         cfg = dataclasses.replace(cfg, data=dataclasses.replace(cfg.data, test_subject_ids=[]))
     cache_dir = args.cache_dir / "epochs_cache" if args.cache_dir else None
-    export_patch_transformer(get_cross_subject_data(cfg.data, n_jobs=args.n_jobs, cache_dir=cache_dir), cfg, args.out)
+    export_patch_transformer(get_cross_subject_data(cfg.data, n_jobs=args.n_jobs, cache_dir=cache_dir), cfg, args.out, args.epochs)
