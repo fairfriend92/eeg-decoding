@@ -50,11 +50,12 @@ ensure_session() {
     fi
 }
 
-# Uploads a local directory tree to REMOTE_ROOT/<remote_subdir>, preserving
+# Uploads a local directory tree file by file to REMOTE_ROOT/<remote_subdir>, preserving
 # structure and skipping __pycache__. An optional third argument replaces
 # REMOTE_ROOT/<remote_subdir> as the absolute destination. Requires
-# SESSION_ARGS to be set.
-upload_tree() {
+# SESSION_ARGS to be set. Use for large trees (data, checkpoints), where one
+# bundled upload could not be resumed.
+upload_tree_files() {
     local local_dir="$1" remote_subdir="$2"
     local remote_base="${3:-${REMOTE_ROOT}/${remote_subdir}}"
     local file rel remote remote_dirs
@@ -75,6 +76,27 @@ upload_tree() {
         echo "upload: ${file} -> ${remote}"
         "$COLAB" upload "${SESSION_ARGS[@]}" "$file" "$remote"
     done < <(find "$local_dir" -type f -not -path '*/__pycache__/*' -print0)
+}
+
+# Uploads a local directory tree to REMOTE_ROOT/<remote_subdir> as one tarball
+# carried inside a single exec call, which unpacks it remotely, skipping __pycache__. An optional third argument
+# replaces REMOTE_ROOT/<remote_subdir> as the absolute destination. One
+# call replaces one per file, which keeps the tunnel's quiet time short.
+# Requires SESSION_ARGS to be set.
+upload_tree() {
+    local local_dir="$1" remote_subdir="$2"
+    local remote_base="${3:-${REMOTE_ROOT}/${remote_subdir}}"
+    local bundle
+    bundle="$(mktemp --suffix=.tgz)"
+    tar -C "$local_dir" --exclude='__pycache__' -czf "$bundle" .
+    echo "upload: ${local_dir} -> ${remote_base} ($(du -h "$bundle" | cut -f1))"
+    {
+        echo "import base64, io, os, tarfile"
+        echo "os.makedirs(${remote_base@Q}, exist_ok=True)"
+        echo "data = base64.b64decode('$(base64 -w0 "$bundle")')"
+        echo "tarfile.open(fileobj=io.BytesIO(data)).extractall(${remote_base@Q})"
+    } | "$COLAB" exec "${SESSION_ARGS[@]}" >/dev/null
+    rm -f "$bundle"
 }
 
 # Downloads REMOTE_ROOT/<remote_subdir> back to REPO_ROOT/<remote_subdir>.
@@ -117,4 +139,47 @@ download_tree() {
 # doesn't have. Requires SESSION_ARGS to be set.
 mount_drive() {
     "$COLAB" drivemount "${SESSION_ARGS[@]}"
+}
+
+# Creates the session and mounts Drive, then runs a trivial exec to confirm
+# the tunnel is alive. A dead tunnel (`Connection was lost` while `colab
+# status` still reports IDLE) is not recoverable in place, so the session is
+# stopped and the whole step retried on a fresh one, up to three attempts.
+# Drive authorization is asked again on each attempt. Sets SESSION_ARGS.
+prepare_session() {
+    local attempt
+    for attempt in 1 2 3; do
+        ensure_session
+        if mount_drive && echo "print('tunnel ok')" | "$COLAB" exec "${SESSION_ARGS[@]}"; then
+            return 0
+        fi
+        echo "== tunnel check failed (attempt ${attempt}/3), restarting the session =="
+        "$COLAB" stop "${SESSION_ARGS[@]}" || true
+    done
+    echo "Could not get a live session in 3 attempts." >&2
+    return 1
+}
+
+# Runs a bootstrap file with `colab exec`, retrying when the call dies in the
+# CLI's own setup step (`Connection was lost` before any of the file ran),
+# which is safe to repeat. A loss later in the run is not retried: the kernel
+# keeps running it, and rerunning would start a second copy. Requires
+# SESSION_ARGS to be set.
+#   exec_bootstrap BOOTSTRAP_FILE TIMEOUT_SECONDS
+exec_bootstrap() {
+    local bootstrap="$1" timeout="$2" attempt log status
+    log="$(mktemp)"
+    for attempt in 1 2 3; do
+        "$COLAB" exec "${SESSION_ARGS[@]}" -f "$bootstrap" --timeout "$timeout" 2>&1 | tee "$log"
+        status=${PIPESTATUS[0]}
+        [[ "$status" -eq 0 ]] && { rm -f "$log"; return 0; }
+        if ! grep -q "Ensure we are in /content" "$log"; then
+            rm -f "$log"
+            return "$status"
+        fi
+        echo "== exec failed before running (attempt ${attempt}/3), retrying =="
+        sleep 5
+    done
+    rm -f "$log"
+    return 1
 }

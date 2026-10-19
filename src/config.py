@@ -307,6 +307,18 @@ class PatchTransformerConfig:
         means unset, so the sample counts above are used as given. When
         set, make_config derives the sample counts from
         data.resample_freq (see resolve_patch_samples).
+    channel_groups : list of list of int, optional
+        Channel indices of each spatial group. None collapses all channels
+        into one token per window. Otherwise each group is collapsed by its
+        own spatial filters, giving one token per group and window. Indices
+        depend on the dataset's channel order, so it is set from a config
+        file rather than a default.
+    channel_gate_reduction : int
+        Bottleneck reduction of a per-window channel gate applied before the
+        spatial convolution. 0 disables the gate.
+    factorized_spatial : bool
+        Replaces the full spatial convolution by a depthwise one followed by
+        a 1x1 convolution. Cannot be combined with channel_groups.
     embed_dim : int
         Token embedding dimension.
     n_heads : int
@@ -327,6 +339,9 @@ class PatchTransformerConfig:
     patch_stride: int = 0
     patch_size_ms: float = 0.0
     patch_stride_ms: float = 0.0
+    channel_groups: list = None
+    channel_gate_reduction: int = 0
+    factorized_spatial: bool = False
     embed_dim: int = 64
     n_heads: int = 8
     n_layers: int = 4

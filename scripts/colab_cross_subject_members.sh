@@ -70,8 +70,7 @@ while [[ $# -gt 0 ]]; do
 done
 [[ -z "$SESSION" || -z "$DATASET" || -z "$MEMBERS" ]] && { echo "-s, --dataset and --members are required" >&2; exit 1; }
 
-ensure_session
-mount_drive
+prepare_session
 
 echo "== syncing src/ and configs/ =="
 upload_tree "${REPO_ROOT}/src" "src"

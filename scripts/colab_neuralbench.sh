@@ -80,8 +80,7 @@ done
 # `colab stop` on the busy session directly rather than a client timeout.
 EXEC_TIMEOUT=86400
 
-ensure_session
-mount_drive
+prepare_session
 
 # A --pretrained-trunk checkpoint is a local output/trunk_pretrained/*.pt file
 # from src/pretrain_trunk.py, which download_tree only ever pulls down to the

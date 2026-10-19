@@ -110,6 +110,24 @@ def evaluate_subject(entry, model_name, cfg: Config):
                 f"{patch_cfg.patch_size}/{patch_cfg.patch_stride or patch_cfg.patch_size}. "
                 "Pass the same --set overrides used at train time."
             )
+        if patch_entry.get("factorized_spatial", False) != patch_cfg.factorized_spatial:
+            raise ValueError(
+                f"Checkpoint manifest entry for subject {entry['subject']} was trained with "
+                f"factorized_spatial {patch_entry.get('factorized_spatial', False)}, but cfg has "
+                f"{patch_cfg.factorized_spatial}. Pass the same --config used at train time."
+            )
+        if patch_entry.get("channel_gate_reduction", 0) != patch_cfg.channel_gate_reduction:
+            raise ValueError(
+                f"Checkpoint manifest entry for subject {entry['subject']} was trained with "
+                f"channel_gate_reduction {patch_entry.get('channel_gate_reduction', 0)}, but cfg has "
+                f"{patch_cfg.channel_gate_reduction}. Pass the same --config used at train time."
+            )
+        if patch_entry.get("channel_groups") != patch_cfg.channel_groups:
+            raise ValueError(
+                f"Checkpoint manifest entry for subject {entry['subject']} was trained with channel_groups "
+                f"{patch_entry.get('channel_groups')}, but cfg has {patch_cfg.channel_groups}. "
+                "Pass the same --config used at train time."
+            )
 
     subject_id = entry["subject"]
     _, _, X_test, y_test = get_subject_data(subject_id, cfg.data)

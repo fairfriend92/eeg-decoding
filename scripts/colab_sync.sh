@@ -34,7 +34,7 @@ upload_tree "${REPO_ROOT}/src" "src"
 if [[ "$SYNC_DATA" -eq 1 ]]; then
     echo "== syncing data/ to ${DRIVE_DATA_DIR} (this can take a while) =="
     mount_drive
-    upload_tree "${REPO_ROOT}/data" "data" "$DRIVE_DATA_DIR"
+    upload_tree_files "${REPO_ROOT}/data" "data" "$DRIVE_DATA_DIR"
 else
     echo "skipping data/ (pass --data to upload it)"
 fi

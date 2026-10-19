@@ -34,8 +34,7 @@ done
 # duration estimate.
 EXEC_TIMEOUT=86400
 
-ensure_session
-mount_drive
+prepare_session
 
 if [[ "$SKIP_SYNC" -eq 0 ]]; then
     echo "== syncing src/ =="

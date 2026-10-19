@@ -40,8 +40,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-ensure_session
-mount_drive
+prepare_session
 
 if [[ "$SKIP_SYNC" -eq 0 ]]; then
     echo "== syncing src/ =="

@@ -39,8 +39,7 @@ if [[ "${#EVAL_ARGS[@]}" -eq 0 ]]; then
     exit 1
 fi
 
-ensure_session
-mount_drive
+prepare_session
 
 if [[ "$SKIP_SYNC" -eq 0 ]]; then
     echo "== syncing src/ =="
@@ -48,7 +47,7 @@ if [[ "$SKIP_SYNC" -eq 0 ]]; then
     upload_tree "${REPO_ROOT}/configs" "configs"
 
     echo "== syncing output/ (checkpoints) =="
-    upload_tree "${REPO_ROOT}/output" "output"
+    upload_tree_files "${REPO_ROOT}/output" "output"
 
     echo "== installing requirements.txt =="
     "$COLAB" install "${SESSION_ARGS[@]}" -r "${REPO_ROOT}/requirements.txt"
