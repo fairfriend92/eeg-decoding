@@ -767,7 +767,10 @@ def train_one_subject(subject_id, model_name, cfg: Config, n_folds=1, cropped_cf
          "patch_stride": cfg.patch_transformer.patch_stride or cfg.patch_transformer.patch_size,
          "channel_groups": cfg.patch_transformer.channel_groups,
          "channel_gate_reduction": cfg.patch_transformer.channel_gate_reduction,
-         "factorized_spatial": cfg.patch_transformer.factorized_spatial}
+         "factorized_spatial": cfg.patch_transformer.factorized_spatial,
+         "band_kernel": cfg.patch_transformer.band_kernel,
+         "multiband_kernels": cfg.patch_transformer.multiband_kernels,
+         "cov_window": cfg.patch_transformer.cov_window}
         if model_name == "patch_transformer" else None
     )
 

@@ -13,6 +13,7 @@ import math
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from config import PatchTransformerConfig
 
@@ -55,6 +56,9 @@ class PatchEmbedding(nn.Module):
     factorized_spatial : bool, optional
         Replaces the full spatial convolution by a depthwise one followed
         by a 1x1 convolution. Incompatible with channel_groups.
+    band_kernel : int, optional
+        Length in samples of the stride-1 temporal filters that feed the
+        band power tokens. 0 keeps the amplitude tokens.
 
     Raises
     ------
@@ -63,10 +67,26 @@ class PatchEmbedding(nn.Module):
         if factorized_spatial is combined with channel_groups.
     """
 
-    def __init__(self, n_channels, embed_dim, patch_size, patch_stride=None, channel_groups=None, channel_gate_reduction=0, factorized_spatial=False):
+    def __init__(self, n_channels, embed_dim, patch_size, patch_stride=None, channel_groups=None, channel_gate_reduction=0, factorized_spatial=False, band_kernel=0, multiband_kernels=None):
         super().__init__()
         patch_stride = patch_stride or patch_size
-        self.temporal_conv = nn.Conv2d(1, embed_dim, (1, patch_size), stride=(1, patch_stride), bias=False)
+        self.band_kernel = band_kernel
+        self.patch_size, self.patch_stride = patch_size, patch_stride
+        if multiband_kernels and band_kernel:
+            raise ValueError("multiband_kernels cannot be combined with band_kernel")
+        if multiband_kernels:
+            if any(k < patch_size or (k - patch_size) % 2 for k in multiband_kernels):
+                raise ValueError(f"multiband_kernels must exceed patch_size={patch_size} by an even number of samples")
+            widths = [embed_dim // len(multiband_kernels)] * len(multiband_kernels)
+            widths[-1] += embed_dim - sum(widths)
+            self.temporal_conv = nn.ModuleList([
+                nn.Conv2d(1, w, (1, k), stride=(1, patch_stride), padding=(0, (k - patch_size) // 2), bias=False)
+                for w, k in zip(widths, multiband_kernels)
+            ])
+        elif band_kernel:
+            self.temporal_conv = nn.Conv2d(1, embed_dim, (1, band_kernel), bias=False)
+        else:
+            self.temporal_conv = nn.Conv2d(1, embed_dim, (1, patch_size), stride=(1, patch_stride), bias=False)
         self.channel_groups = channel_groups
         self.channel_gate = nn.Sequential(
             nn.Linear(n_channels, n_channels // channel_gate_reduction), nn.ReLU(),
@@ -103,7 +123,10 @@ class PatchEmbedding(nn.Module):
             without channel_groups.
         """
         x = x.unsqueeze(1)                  # (batch, 1, channels, times)
-        x = self.temporal_conv(x)           # (batch, embed_dim, channels, n_patches)
+        if isinstance(self.temporal_conv, nn.ModuleList):
+            x = torch.cat([conv(x) for conv in self.temporal_conv], dim=1)
+        else:
+            x = self.temporal_conv(x)       # (batch, embed_dim, channels, n_patches)
         if self.channel_gate is not None:
             power = x.pow(2).mean(dim=1)                                  # (batch, channels, n_patches)
             power = power / (power.mean(dim=1, keepdim=True) + 1e-8)      # scale-free relative power
@@ -113,8 +136,79 @@ class PatchEmbedding(nn.Module):
             x = self.spatial_conv(x)        # (batch, embed_dim, 1, n_patches)
         else:
             x = torch.cat([conv(x[:, :, g, :]) for conv, g in zip(self.spatial_conv, self.channel_groups)], dim=2)
-        x = self.activation(self.norm(x))   # (batch, embed_dim, n_groups, n_patches)
+        x = self.norm(x)
+        if self.band_kernel:
+            x = F.avg_pool2d(x.pow(2), (1, self.patch_size), (1, self.patch_stride))
+            x = torch.log(x.clamp(min=1e-6))
+        else:
+            x = self.activation(x)          # (batch, embed_dim, n_groups, n_patches)
         return x.permute(0, 3, 2, 1).flatten(1, 2)
+
+
+class CovarianceEmbedding(nn.Module):
+    """Tokenizes EEG epochs via log-Euclidean covariance features of sliding windows.
+
+    Each window's channel covariance is shrunk toward a scaled identity to
+    keep it positive definite, mapped to the matrix logarithm, and its upper
+    triangle (off-diagonals scaled by sqrt(2)) is projected linearly to the
+    token dimension. The logarithm is taken at the identity, which is the
+    natural reference once the trials are aligned. The covariance and its
+    logarithm contain no learned weights, so they are computed without gradients in
+    float32.
+
+    Parameters
+    ----------
+    n_channels : int
+        Number of EEG channels.
+    embed_dim : int
+        Token embedding dimension.
+    window : int
+        Number of time samples per covariance window.
+    stride : int
+        Step between window starts, in samples.
+    shrinkage : float
+        Weight of the scaled identity in the shrunk covariance, in [0, 1).
+    """
+
+    def __init__(self, n_channels, embed_dim, window, stride, shrinkage):
+        super().__init__()
+        self.window, self.stride, self.shrinkage = window, stride, shrinkage
+        rows, cols = torch.triu_indices(n_channels, n_channels)
+        self.register_buffer("rows", rows, persistent=False)
+        self.register_buffer("cols", cols, persistent=False)
+        scale = torch.where(rows == cols, 1.0, math.sqrt(2.0))
+        self.register_buffer("scale", scale, persistent=False)
+        self.projection = nn.Linear(len(rows), embed_dim, bias=False)
+        self.norm       = nn.BatchNorm1d(embed_dim)
+        self.activation = nn.ELU()
+
+    def forward(self, x):
+        """
+        Parameters
+        ----------
+        x : Tensor, shape (batch, n_channels, n_times)
+
+        Returns
+        -------
+        Tensor, shape (batch, n_windows, embed_dim)
+        """
+        with torch.no_grad(), torch.autocast(device_type=x.device.type, enabled=False):
+            w = x.float().unfold(2, self.window, self.stride)             # (batch, channels, n_windows, window)
+            w = w.permute(0, 2, 1, 3)
+            w = w - w.mean(dim=-1, keepdim=True)
+            cov = w @ w.transpose(-1, -2) / self.window                   # (batch, n_windows, channels, channels)
+            eye = torch.eye(cov.shape[-1], device=cov.device)
+            trace = cov.diagonal(dim1=-2, dim2=-1).mean(dim=-1)[..., None, None]
+            cov = (1 - self.shrinkage) * cov + self.shrinkage * trace * eye
+            # Batched eigh on small matrices is much faster with LAPACK on the CPU than with cuSOLVER.
+            eigvals, eigvecs = torch.linalg.eigh(cov.cpu())
+            log_cov = (eigvecs * torch.log(eigvals.clamp(min=1e-8)).unsqueeze(-2)) @ eigvecs.transpose(-1, -2)
+            log_cov = log_cov.to(x.device)
+            features = log_cov[..., self.rows, self.cols] * self.scale    # (batch, n_windows, n_features)
+        tokens = self.projection(features)
+        batch, n_windows, dim = tokens.shape
+        tokens = self.activation(self.norm(tokens.reshape(-1, dim))).reshape(batch, n_windows, dim)
+        return tokens
 
 
 def sinusoidal_positional_encoding(seq_len, embed_dim, device):
@@ -162,10 +256,18 @@ class PatchTransformer(nn.Module):
         super().__init__()
 
         patch_stride = cfg.patch_stride or cfg.patch_size
-        if n_times < cfg.patch_size:
-            raise ValueError(f"n_times={n_times} is shorter than patch_size={cfg.patch_size}")
-        self.n_patches   = (n_times - cfg.patch_size) // patch_stride + 1
-        self.patch_embed = PatchEmbedding(n_channels, cfg.embed_dim, cfg.patch_size, patch_stride, cfg.channel_groups, cfg.channel_gate_reduction, cfg.factorized_spatial)
+        band_kernel      = cfg.band_kernel
+        n_filtered       = n_times - band_kernel + 1 if band_kernel else n_times
+        window           = cfg.cov_window or cfg.patch_size
+        if n_filtered < window:
+            raise ValueError(f"{n_filtered} filtered samples are fewer than the token window of {window}")
+        self.n_patches   = (n_filtered - window) // patch_stride + 1
+        if cfg.cov_window:
+            if band_kernel or cfg.multiband_kernels or cfg.channel_groups or cfg.channel_gate_reduction or cfg.factorized_spatial:
+                raise ValueError("cov_window cannot be combined with the other tokenizer options")
+            self.patch_embed = CovarianceEmbedding(n_channels, cfg.embed_dim, cfg.cov_window, patch_stride, cfg.cov_shrinkage)
+        else:
+            self.patch_embed = PatchEmbedding(n_channels, cfg.embed_dim, cfg.patch_size, patch_stride, cfg.channel_groups, cfg.channel_gate_reduction, cfg.factorized_spatial, band_kernel, cfg.multiband_kernels)
         self.n_groups    = len(cfg.channel_groups) if cfg.channel_groups else 1
         self.region_embed = nn.Parameter(torch.randn(self.n_groups, cfg.embed_dim) * 0.02) if cfg.channel_groups else None
 

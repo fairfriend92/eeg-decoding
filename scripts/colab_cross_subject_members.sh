@@ -25,6 +25,8 @@
 # count from the fitting participants, validation probabilities in the dump).
 # --exclude leaves participants out of the pool entirely. --tag is extra
 # file-name text before the fold index, which the download then expects.
+# --kfold K also downloads weights_MEMBER<suffix>_kfoldK<tag><fold>.pt for every
+# fold, the K models' state dicts.
 # --epochs N fixes the epoch count of the neural members' final fit and skips
 # the early-stopped fit that otherwise sets it.
 #
@@ -64,7 +66,7 @@ while [[ $# -gt 0 ]]; do
         --exclude) EXCLUDE="$2"; shift 2 ;;
         --tag) TAG="$2"; shift 2 ;;
         --epochs) EPOCHS="$2"; shift 2 ;;
-        -h|--help) sed -n '2,33p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,35p' "$0"; exit 0 ;;
         *) echo "Unknown argument: $1" >&2; exit 1 ;;
     esac
 done
@@ -162,6 +164,15 @@ for member in $MEMBERS; do
         "$COLAB" download "${SESSION_ARGS[@]}" "${REMOTE_OUT}/cross_subject/predictions_${member}${SUFFIX}${KFOLD_TAG}${TAG}${fold}.npz" "${REPO_ROOT}/output/${DATASET}/cross_subject/predictions_${member}${SUFFIX}${KFOLD_TAG}${TAG}${fold}.npz"
     done
 done
+
+if [[ "$KFOLD" -gt 0 ]]; then
+    for member in $MEMBERS; do
+        for fold in "${FOLD_SUFFIXES[@]}"; do
+            echo "== downloading weights_${member}${SUFFIX}${KFOLD_TAG}${TAG}${fold}.pt =="
+            "$COLAB" download "${SESSION_ARGS[@]}" "${REMOTE_OUT}/cross_subject/weights_${member}${SUFFIX}${KFOLD_TAG}${TAG}${fold}.pt" "${REPO_ROOT}/output/${DATASET}/cross_subject/weights_${member}${SUFFIX}${KFOLD_TAG}${TAG}${fold}.pt"
+        done
+    done
+fi
 
 "$COLAB" stop "${SESSION_ARGS[@]}"
 echo "done"

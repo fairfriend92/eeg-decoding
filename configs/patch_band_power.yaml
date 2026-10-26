@@ -1,0 +1,4 @@
+patch_transformer:
+  patch_size_ms: 100
+  patch_stride_ms: 40
+  band_kernel_ms: 250

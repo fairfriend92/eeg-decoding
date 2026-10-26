@@ -319,6 +319,28 @@ class PatchTransformerConfig:
     factorized_spatial : bool
         Replaces the full spatial convolution by a depthwise one followed by
         a 1x1 convolution. Cannot be combined with channel_groups.
+    band_kernel : int
+        Length in samples of the stride-1 temporal filters of the band power
+        tokenizer, which squares, averages over each patch window and takes
+        the log. 0 keeps the amplitude tokens. Overwritten by make_config
+        when band_kernel_ms is set.
+    band_kernel_ms : float
+        band_kernel in milliseconds, dataset-independent. 0.0 means unset.
+    multiband_kernels : list of int, optional
+        Lengths in samples of parallel temporal convolutions that share the
+        embedding channels, each at the patch stride. None keeps the single
+        patch-sized convolution. Overwritten by make_config when
+        multiband_kernels_ms is set.
+    multiband_kernels_ms : list of float, optional
+        multiband_kernels in milliseconds, dataset-independent.
+    cov_window : int
+        Length in samples of the covariance windows of the log-Euclidean
+        covariance tokenizer, taken at patch_stride. 0 keeps the convolutional
+        tokenizer. Overwritten by make_config when cov_window_ms is set.
+    cov_window_ms : float
+        cov_window in milliseconds, dataset-independent. 0.0 means unset.
+    cov_shrinkage : float
+        Weight of the scaled identity in each window's shrunk covariance.
     embed_dim : int
         Token embedding dimension.
     n_heads : int
@@ -342,6 +364,13 @@ class PatchTransformerConfig:
     channel_groups: list = None
     channel_gate_reduction: int = 0
     factorized_spatial: bool = False
+    band_kernel: int = 0
+    band_kernel_ms: float = 0.0
+    multiband_kernels: list = None
+    multiband_kernels_ms: list = None
+    cov_window: int = 0
+    cov_window_ms: float = 0.0
+    cov_shrinkage: float = 0.1
     embed_dim: int = 64
     n_heads: int = 8
     n_layers: int = 4
@@ -373,6 +402,12 @@ def resolve_patch_samples(patch_cfg: PatchTransformerConfig, resample_freq):
         patch_cfg.patch_size = round(patch_cfg.patch_size_ms * resample_freq / 1000)
     if patch_cfg.patch_stride_ms:
         patch_cfg.patch_stride = round(patch_cfg.patch_stride_ms * resample_freq / 1000)
+    if patch_cfg.band_kernel_ms:
+        patch_cfg.band_kernel = round(patch_cfg.band_kernel_ms * resample_freq / 1000)
+    if patch_cfg.cov_window_ms:
+        patch_cfg.cov_window = round(patch_cfg.cov_window_ms * resample_freq / 1000)
+    if patch_cfg.multiband_kernels_ms:
+        patch_cfg.multiband_kernels = [round(ms * resample_freq / 1000) for ms in patch_cfg.multiband_kernels_ms]
     return patch_cfg
 
 

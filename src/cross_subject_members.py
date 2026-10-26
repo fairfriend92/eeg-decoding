@@ -165,6 +165,13 @@ def dump_kfold_ensemble(member, data, cfg: Config, n_inner, fold=None, tag=""):
         test rows, "probs_models" of shape (n_inner, n_rows, n_classes) and
         "best_epochs" and "held_out_acc" of shape (n_inner,).
 
+    Notes
+    -----
+    The n_inner models' state dicts are saved next to the dump as
+    "weights_{member}{suffix}_kfold{n_inner}{tag}{fold}.pt", a dict with
+    "state_dicts" (CPU tensors), "best_epochs" and "model_cfg" (the member's
+    architecture config as a dict).
+
     Raises
     ------
     ValueError
@@ -179,12 +186,13 @@ def dump_kfold_ensemble(member, data, cfg: Config, n_inner, fold=None, tag=""):
     batch_size = cfg.train.batch_size
 
     shuffled = np.random.default_rng(cfg.data.val_subject_seed).permutation(np.unique(subject_all))
-    probs_models, best_epochs, held_out_acc = [], [], []
+    probs_models, best_epochs, held_out_acc, state_dicts = [], [], [], []
     for j, held_out in enumerate(np.array_split(shuffled, n_inner)):
         mask = np.isin(subject_all, held_out)
         model, acc, best_epoch = fit_on_split(
             X_all[~mask], y_all[~mask], X_all[mask], y_all[mask], member, cfg, seed=cfg.train.seed + j)
         probs_models.append(predict_probs(model, data["X_test"], device, batch_size))
+        state_dicts.append({k: v.detach().cpu() for k, v in model.state_dict().items()})
         best_epochs.append(best_epoch)
         held_out_acc.append(acc)
         print(f"[{member}] inner fold {j}: held out {sorted(int(s) for s in held_out)}, "
@@ -198,7 +206,9 @@ def dump_kfold_ensemble(member, data, cfg: Config, n_inner, fold=None, tag=""):
     }
     out_dir = output_dir_for(cfg) / "cross_subject"
     out_dir.mkdir(parents=True, exist_ok=True)
-    np.savez(out_dir / f"predictions_{member}{alignment_suffix(cfg)}_kfold{n_inner}{tag}{'' if fold is None else f'_f{fold}'}.npz", **dump)
+    stem = f"{member}{alignment_suffix(cfg)}_kfold{n_inner}{tag}{'' if fold is None else f'_f{fold}'}"
+    np.savez(out_dir / f"predictions_{stem}.npz", **dump)
+    torch.save({"state_dicts": state_dicts, "best_epochs": best_epochs, "model_cfg": dataclasses.asdict(getattr(cfg, member))}, out_dir / f"weights_{stem}.pt")
     print(f"[{member}] k-fold ensemble test acc={(dump['probs'].argmax(axis=1) == data['y_test']).mean():.3f}", flush=True)
     return dump
 

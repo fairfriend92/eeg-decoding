@@ -1,0 +1,4 @@
+patch_transformer:
+  patch_size_ms: 100
+  patch_stride_ms: 40
+  cov_window_ms: 500
