@@ -341,6 +341,18 @@ class PatchTransformerConfig:
         cov_window in milliseconds, dataset-independent. 0.0 means unset.
     cov_shrinkage : float
         Weight of the scaled identity in each window's shrunk covariance.
+    phase_window : int
+        Length in samples of the windows of the phase-synchrony tokens, taken
+        at patch_stride and added to the main tokenizer's tokens. 0 disables
+        them. Overwritten by make_config when phase_window_ms is set.
+    phase_window_ms : float
+        phase_window in milliseconds, dataset-independent. 0.0 means unset.
+    phase_bands : list of list of float, optional
+        Frequency bands in Hz, as [low, high] pairs, in which the channel
+        phase differences are computed. Required when phase_window is set.
+    phase_sfreq : float
+        Sampling rate in Hz that phase_bands refer to. Set by make_config
+        from data.resample_freq.
     embed_dim : int
         Token embedding dimension.
     n_heads : int
@@ -371,6 +383,10 @@ class PatchTransformerConfig:
     cov_window: int = 0
     cov_window_ms: float = 0.0
     cov_shrinkage: float = 0.1
+    phase_window: int = 0
+    phase_window_ms: float = 0.0
+    phase_bands: list = None
+    phase_sfreq: float = 0.0
     embed_dim: int = 64
     n_heads: int = 8
     n_layers: int = 4
@@ -408,6 +424,9 @@ def resolve_patch_samples(patch_cfg: PatchTransformerConfig, resample_freq):
         patch_cfg.cov_window = round(patch_cfg.cov_window_ms * resample_freq / 1000)
     if patch_cfg.multiband_kernels_ms:
         patch_cfg.multiband_kernels = [round(ms * resample_freq / 1000) for ms in patch_cfg.multiband_kernels_ms]
+    if patch_cfg.phase_window_ms:
+        patch_cfg.phase_window = round(patch_cfg.phase_window_ms * resample_freq / 1000)
+    patch_cfg.phase_sfreq = resample_freq
     return patch_cfg
 
 

@@ -57,7 +57,13 @@ def _fbcsp_probs(data, cfg: Config):
     )
 
 
-def _neural_probs(data, cfg: Config, model_name, ensemble, n_epochs=None):
+def _save_final_weights(model, cfg: Config, model_name, n_epochs, weights_path):
+    """Writes the final refit's state dict in the layout of the k-fold weight files."""
+    state = {k: v.detach().cpu() for k, v in model.state_dict().items()}
+    torch.save({"state_dicts": [state], "best_epochs": [n_epochs], "model_cfg": dataclasses.asdict(getattr(cfg, model_name))}, weights_path)
+
+
+def _neural_probs(data, cfg: Config, model_name, ensemble, n_epochs=None, weights_path=None):
     X_all = np.concatenate([data["X_fit"], data["X_val"]])
     y_all = np.concatenate([data["y_fit"], data["y_val"]])
     device = torch.device(cfg.train.device if torch.cuda.is_available() else "cpu")
@@ -71,6 +77,7 @@ def _neural_probs(data, cfg: Config, model_name, ensemble, n_epochs=None):
             n_train = len(X_all) - round(len(X_all) * 0.2)
             n_epochs = compute_matched_epochs([(best_epoch, n_train)], len(X_all), batch_size)
         final = fit_full(X_all, y_all, model_name, cfg, n_epochs)
+        _save_final_weights(final, cfg, model_name, n_epochs, weights_path)
         return None, predict_probs(final, data["X_test"], device, batch_size), None
 
     # fit() holds out a fifth of the fitting trials for early stopping, so the
@@ -82,6 +89,7 @@ def _neural_probs(data, cfg: Config, model_name, ensemble, n_epochs=None):
     n_epochs = compute_matched_epochs([(best_epoch, n_fit_train)], len(X_all), batch_size)
 
     final = fit_full(X_all, y_all, model_name, cfg, n_epochs)
+    _save_final_weights(final, cfg, model_name, n_epochs, weights_path)
     return val_probs, predict_probs(final, data["X_test"], device, batch_size), probs_fit
 
 
@@ -214,11 +222,11 @@ def dump_kfold_ensemble(member, data, cfg: Config, n_inner, fold=None, tag=""):
 
 
 MEMBERS = {
-    "riemann": lambda data, cfg, ensemble, n_epochs: _riemann_probs(data, cfg),
-    "fbcsp": lambda data, cfg, ensemble, n_epochs: _fbcsp_probs(data, cfg),
-    "eegnet": lambda data, cfg, ensemble, n_epochs: _neural_probs(data, cfg, "eegnet", ensemble, n_epochs),
-    "patch_transformer": lambda data, cfg, ensemble, n_epochs: _neural_probs(data, cfg, "patch_transformer", ensemble, n_epochs),
-    "conformer": lambda data, cfg, ensemble, n_epochs: _neural_probs(data, cfg, "conformer", ensemble, n_epochs),
+    "riemann": lambda data, cfg, ensemble, n_epochs, weights_path: _riemann_probs(data, cfg),
+    "fbcsp": lambda data, cfg, ensemble, n_epochs, weights_path: _fbcsp_probs(data, cfg),
+    "eegnet": lambda data, cfg, ensemble, n_epochs, weights_path: _neural_probs(data, cfg, "eegnet", ensemble, n_epochs, weights_path),
+    "patch_transformer": lambda data, cfg, ensemble, n_epochs, weights_path: _neural_probs(data, cfg, "patch_transformer", ensemble, n_epochs, weights_path),
+    "conformer": lambda data, cfg, ensemble, n_epochs, weights_path: _neural_probs(data, cfg, "conformer", ensemble, n_epochs, weights_path),
 }
 
 
@@ -265,19 +273,26 @@ def dump_cross_subject_member(member, data, cfg: Config, fold=None, ensemble=Fal
         "session" for the test rows. With ensemble, also "probs_fit" (trained on
         the fitting participants only) and "val_subject", "val_y", "val_probs"
         and "val_session" for the validation rows.
+
+    Notes
+    -----
+    A neural member's final refit is saved next to the dump as
+    "weights_{member}{suffix}{tag}{fold}.pt", in the layout of the k-fold
+    weight files with a single state dict.
     """
     if cfg.data.alignment == "riemannian" and member != "riemann":
         raise ValueError("Riemannian alignment applies to the riemann member only.")
-    val_probs, probs, probs_fit = MEMBERS[member](data, cfg, ensemble, n_epochs)
+    out_dir = output_dir_for(cfg) / "cross_subject"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stem = f"{member}{alignment_suffix(cfg)}{tag}{'' if fold is None else f'_f{fold}'}"
+    val_probs, probs, probs_fit = MEMBERS[member](data, cfg, ensemble, n_epochs, out_dir / f"weights_{stem}.pt")
     dump = {"subject": data["subject_test"], "y": data["y_test"], "probs": probs, "session": data["session_test"]}
     if val_probs is not None:
         dump.update({
             "probs_fit": probs_fit,
             "val_subject": data["subject_val"], "val_y": data["y_val"], "val_probs": val_probs, "val_session": data["session_val"],
         })
-    out_dir = output_dir_for(cfg) / "cross_subject"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    np.savez(out_dir / f"predictions_{member}{alignment_suffix(cfg)}{tag}{'' if fold is None else f'_f{fold}'}.npz", **dump)
+    np.savez(out_dir / f"predictions_{stem}.npz", **dump)
     val_report = "" if val_probs is None else f", val acc={(val_probs.argmax(axis=1) == data['y_val']).mean():.3f}"
     print(f"[{member}] test acc={(probs.argmax(axis=1) == data['y_test']).mean():.3f}{val_report}", flush=True)
     return dump
@@ -305,6 +320,12 @@ if __name__ == "__main__":
     for k, test_ids in enumerate(folds):
         fold_cfg = dataclasses.replace(cfg, data=dataclasses.replace(cfg.data, test_subject_ids=test_ids))
         data = get_cross_subject_data(fold_cfg.data, n_jobs=args.n_jobs, cache_dir=cache_dir)
+        # A fixed epoch count in the single refit trains on fit plus validation together, with no stopping.
+        fixed_refit = args.epochs is not None and not (args.ensemble or args.kfold or args.early_stop_all)
+        parts = (("train (fit + val, fixed epochs)", ("fit", "val")), ("test", ("test",))) if fixed_refit else (("fit", ("fit",)), ("val", ("val",)), ("test", ("test",)))
+        print(" ".join(
+            f"{label} participants {sorted(int(s) for p in keys for s in np.unique(data['subject_' + p]))} ({sum(len(data['y_' + p]) for p in keys)} windows)"
+            for label, keys in parts), flush=True)
         for name in args.members:
             if args.early_stop_all:
                 dump_early_stopped_all(name, data, fold_cfg, fold=k if args.n_folds else None, tag=args.tag)

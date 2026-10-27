@@ -770,7 +770,9 @@ def train_one_subject(subject_id, model_name, cfg: Config, n_folds=1, cropped_cf
          "factorized_spatial": cfg.patch_transformer.factorized_spatial,
          "band_kernel": cfg.patch_transformer.band_kernel,
          "multiband_kernels": cfg.patch_transformer.multiband_kernels,
-         "cov_window": cfg.patch_transformer.cov_window}
+         "cov_window": cfg.patch_transformer.cov_window,
+         "phase_window": cfg.patch_transformer.phase_window,
+         "phase_bands": cfg.patch_transformer.phase_bands}
         if model_name == "patch_transformer" else None
     )
 

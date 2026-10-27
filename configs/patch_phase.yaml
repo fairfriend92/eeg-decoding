@@ -1,0 +1,8 @@
+patch_transformer:
+  patch_size_ms: 100
+  patch_stride_ms: 40
+  phase_window_ms: 500
+  phase_bands:
+    - [4, 8]
+    - [8, 13]
+    - [13, 30]

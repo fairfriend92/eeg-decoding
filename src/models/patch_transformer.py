@@ -211,6 +211,88 @@ class CovarianceEmbedding(nn.Module):
         return tokens
 
 
+class PhaseEmbedding(nn.Module):
+    """Tokenizes EEG epochs via inter-channel phase synchrony of sliding windows.
+
+    The trial is band-passed and Hilbert transformed in one step in the
+    frequency domain, giving an analytic signal per band and channel. Each
+    window's complex phase-locking value between every channel pair is the
+    mean of exp(i * phase difference) over the window. Its real and
+    imaginary parts (the cosine and sine of the mean phase difference,
+    weighted by its stability) are projected linearly to the token dimension.
+    The imaginary part vanishes for zero-lag coupling, which is how volume
+    conduction appears, so it carries the lagged coupling alone. The
+    transform contains no learned weights, so it is computed without
+    gradients in float32.
+
+    Parameters
+    ----------
+    n_channels : int
+        Number of EEG channels.
+    n_times : int
+        Number of time samples per epoch.
+    embed_dim : int
+        Token embedding dimension.
+    window : int
+        Number of time samples per synchrony window.
+    stride : int
+        Step between window starts, in samples.
+    pad : int
+        Samples of zero phasor added at each end of the trial, so that a window
+        longer than the main tokenizer's patch stays centered on it. Edge windows
+        see fewer real samples, which lowers their synchrony magnitude.
+    bands : list of list of float
+        [low, high] edges in Hz of each frequency band.
+    sfreq : float
+        Sampling rate of the epochs, in Hz.
+
+    Raises
+    ------
+    ValueError
+        If a band is empty or reaches beyond the Nyquist frequency.
+    """
+
+    def __init__(self, n_channels, n_times, embed_dim, window, stride, pad, bands, sfreq):
+        super().__init__()
+        if any(not 0 <= low < high <= sfreq / 2 for low, high in bands):
+            raise ValueError(f"phase_bands must satisfy 0 <= low < high <= {sfreq / 2} Hz, got {bands}")
+        self.window, self.stride, self.pad = window, stride, pad
+        rows, cols = torch.triu_indices(n_channels, n_channels, offset=1)
+        self.register_buffer("rows", rows, persistent=False)
+        self.register_buffer("cols", cols, persistent=False)
+        freqs = torch.fft.fftfreq(n_times, 1.0 / sfreq)
+        # Positive frequencies doubled and negative ones zeroed give the analytic signal.
+        masks = torch.stack([2.0 * ((freqs >= low) & (freqs < high)).float() for low, high in bands])
+        self.register_buffer("masks", masks, persistent=False)
+        self.projection = nn.Linear(2 * len(bands) * len(rows), embed_dim, bias=False)
+        self.norm       = nn.BatchNorm1d(embed_dim)
+        self.activation = nn.ELU()
+
+    def forward(self, x):
+        """
+        Parameters
+        ----------
+        x : Tensor, shape (batch, n_channels, n_times)
+
+        Returns
+        -------
+        Tensor, shape (batch, n_windows, embed_dim)
+        """
+        with torch.no_grad(), torch.autocast(device_type=x.device.type, enabled=False):
+            spectrum = torch.fft.fft(x.float(), dim=-1)                                      # (batch, channels, times)
+            analytic = torch.fft.ifft(spectrum[:, None] * self.masks[None, :, None], dim=-1) # (batch, bands, channels, times)
+            phasor   = analytic / analytic.abs().clamp(min=1e-8)
+            phasor   = F.pad(phasor, (self.pad, self.pad))
+            w = phasor.unfold(-1, self.window, self.stride).permute(0, 1, 3, 2, 4)          # (batch, bands, n_windows, channels, window)
+            plv = w @ w.conj().transpose(-1, -2) / self.window                               # (batch, bands, n_windows, channels, channels)
+            plv = plv[..., self.rows, self.cols]                                             # (batch, bands, n_windows, n_pairs)
+            features = torch.cat([plv.real, plv.imag], dim=-1).permute(0, 2, 1, 3).flatten(2)
+        tokens = self.projection(features)
+        batch, n_windows, dim = tokens.shape
+        tokens = self.activation(self.norm(tokens.reshape(-1, dim))).reshape(batch, n_windows, dim)
+        return tokens
+
+
 def sinusoidal_positional_encoding(seq_len, embed_dim, device):
     """Computes fixed sinusoidal position encodings.
 
@@ -271,6 +353,20 @@ class PatchTransformer(nn.Module):
         self.n_groups    = len(cfg.channel_groups) if cfg.channel_groups else 1
         self.region_embed = nn.Parameter(torch.randn(self.n_groups, cfg.embed_dim) * 0.02) if cfg.channel_groups else None
 
+        self.phase_embed = None
+        if cfg.phase_window:
+            if not cfg.phase_bands:
+                raise ValueError("phase_window requires phase_bands")
+            if cfg.channel_groups:
+                raise ValueError("phase_window cannot be combined with channel_groups")
+            if cfg.phase_window < window or (cfg.phase_window - window) % 2:
+                raise ValueError(f"phase_window must exceed the token window of {window} samples by an even number of samples")
+            pad = (cfg.phase_window - window) // 2
+            n_phase = (n_times + 2 * pad - cfg.phase_window) // patch_stride + 1
+            if n_phase != self.n_patches:
+                raise ValueError(f"phase_window gives {n_phase} windows but the main tokenizer gives {self.n_patches}")
+            self.phase_embed = PhaseEmbedding(n_channels, n_times, cfg.embed_dim, cfg.phase_window, patch_stride, pad, cfg.phase_bands, cfg.phase_sfreq)
+
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=cfg.embed_dim,
             nhead=cfg.n_heads,
@@ -299,6 +395,8 @@ class PatchTransformer(nn.Module):
         Tensor, shape (batch, n_classes)
         """
         tokens = self.patch_embed(x)                                     # (batch, n_patches * n_groups, embed_dim)
+        if self.phase_embed is not None:
+            tokens = tokens + self.phase_embed(x)
         pe     = sinusoidal_positional_encoding(tokens.shape[1] // self.n_groups, tokens.shape[2], tokens.device)
         pe     = pe.repeat_interleave(self.n_groups, dim=0)              # one time position per window, shared by its groups
         if self.region_embed is not None:

@@ -10,7 +10,7 @@
 # large client-side ceiling, not an estimate of the run time.
 #
 # Usage:
-#   scripts/colab_cross_subject_members.sh -s SESSION --gpu TYPE --dataset DATASET --members "MEMBER ..." [--config FILE] [--set "KEY=VALUE ..."] [--suffix SUFFIX] [--n-folds N] [--kfold K] [--early-stop-all] [--ensemble] [--exclude "ID ..."] [--tag TAG] [--epochs N]
+#   scripts/colab_cross_subject_members.sh -s SESSION --gpu TYPE --dataset DATASET --members "MEMBER ..." [--config FILE] [--set "KEY=VALUE ..."] [--suffix SUFFIX] [--n-folds N] [--kfold K] [--early-stop-all] [--ensemble] [--exclude "ID ..."] [--tag TAG] [--epochs N] [--weights]
 #
 # --set passes config overrides through. --suffix is the dump file-name suffix
 # those overrides produce (_ea for data.alignment=euclidean), so the download
@@ -25,8 +25,10 @@
 # count from the fitting participants, validation probabilities in the dump).
 # --exclude leaves participants out of the pool entirely. --tag is extra
 # file-name text before the fold index, which the download then expects.
-# --kfold K also downloads weights_MEMBER<suffix>_kfoldK<tag><fold>.pt for every
-# fold, the K models' state dicts.
+# Every neural run writes weights files on the VM. --weights downloads them:
+# weights_MEMBER<suffix>_kfoldK<tag><fold>.pt (the K models' state dicts) with
+# --kfold K, and weights_MEMBER<suffix><tag><fold>.pt (the final refit's state
+# dict) for a single dump.
 # --epochs N fixes the epoch count of the neural members' final fit and skips
 # the early-stopped fit that otherwise sets it.
 #
@@ -49,6 +51,7 @@ ENSEMBLE=0
 EXCLUDE=""
 TAG=""
 EPOCHS=""
+WEIGHTS=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -66,6 +69,7 @@ while [[ $# -gt 0 ]]; do
         --exclude) EXCLUDE="$2"; shift 2 ;;
         --tag) TAG="$2"; shift 2 ;;
         --epochs) EPOCHS="$2"; shift 2 ;;
+        --weights) WEIGHTS=1; shift ;;
         -h|--help) sed -n '2,35p' "$0"; exit 0 ;;
         *) echo "Unknown argument: $1" >&2; exit 1 ;;
     esac
@@ -165,7 +169,17 @@ for member in $MEMBERS; do
     done
 done
 
-if [[ "$KFOLD" -gt 0 ]]; then
+if [[ "$WEIGHTS" -eq 1 && "$KFOLD" -eq 0 && "$ES_ALL" -eq 0 ]]; then
+    for member in $MEMBERS; do
+        [[ "$member" =~ ^(eegnet|patch_transformer|conformer)$ ]] || continue
+        for fold in "${FOLD_SUFFIXES[@]}"; do
+            echo "== downloading weights_${member}${SUFFIX}${TAG}${fold}.pt =="
+            "$COLAB" download "${SESSION_ARGS[@]}" "${REMOTE_OUT}/cross_subject/weights_${member}${SUFFIX}${TAG}${fold}.pt" "${REPO_ROOT}/output/${DATASET}/cross_subject/weights_${member}${SUFFIX}${TAG}${fold}.pt"
+        done
+    done
+fi
+
+if [[ "$WEIGHTS" -eq 1 && "$KFOLD" -gt 0 ]]; then
     for member in $MEMBERS; do
         for fold in "${FOLD_SUFFIXES[@]}"; do
             echo "== downloading weights_${member}${SUFFIX}${KFOLD_TAG}${TAG}${fold}.pt =="
