@@ -245,15 +245,22 @@ class PhaseEmbedding(nn.Module):
         [low, high] edges in Hz of each frequency band.
     sfreq : float
         Sampling rate of the epochs, in Hz.
+    parts : str
+        "both" projects the real and imaginary parts, "imag" the imaginary part
+        alone, which halves the input of the projection.
 
     Raises
     ------
     ValueError
-        If a band is empty or reaches beyond the Nyquist frequency.
+        If a band is empty or reaches beyond the Nyquist frequency, or parts
+        is neither "both" nor "imag".
     """
 
-    def __init__(self, n_channels, n_times, embed_dim, window, stride, pad, bands, sfreq):
+    def __init__(self, n_channels, n_times, embed_dim, window, stride, pad, bands, sfreq, parts="both"):
         super().__init__()
+        if parts not in ("both", "imag"):
+            raise ValueError(f"phase_parts must be 'both' or 'imag', got {parts!r}")
+        self.parts = parts
         if any(not 0 <= low < high <= sfreq / 2 for low, high in bands):
             raise ValueError(f"phase_bands must satisfy 0 <= low < high <= {sfreq / 2} Hz, got {bands}")
         self.window, self.stride, self.pad = window, stride, pad
@@ -264,7 +271,7 @@ class PhaseEmbedding(nn.Module):
         # Positive frequencies doubled and negative ones zeroed give the analytic signal.
         masks = torch.stack([2.0 * ((freqs >= low) & (freqs < high)).float() for low, high in bands])
         self.register_buffer("masks", masks, persistent=False)
-        self.projection = nn.Linear(2 * len(bands) * len(rows), embed_dim, bias=False)
+        self.projection = nn.Linear((2 if parts == "both" else 1) * len(bands) * len(rows), embed_dim, bias=False)
         self.norm       = nn.BatchNorm1d(embed_dim)
         self.activation = nn.ELU()
 
@@ -278,6 +285,14 @@ class PhaseEmbedding(nn.Module):
         -------
         Tensor, shape (batch, n_windows, embed_dim)
         """
+        features = self._features(x)
+        tokens = self.projection(features)
+        batch, n_windows, dim = tokens.shape
+        tokens = self.activation(self.norm(tokens.reshape(-1, dim))).reshape(batch, n_windows, dim)
+        return tokens
+
+    def _features(self, x):
+        """Returns the phase-locking features of every window, shape (batch, n_windows, n_features)."""
         with torch.no_grad(), torch.autocast(device_type=x.device.type, enabled=False):
             spectrum = torch.fft.fft(x.float(), dim=-1)                                      # (batch, channels, times)
             analytic = torch.fft.ifft(spectrum[:, None] * self.masks[None, :, None], dim=-1) # (batch, bands, channels, times)
@@ -286,11 +301,45 @@ class PhaseEmbedding(nn.Module):
             w = phasor.unfold(-1, self.window, self.stride).permute(0, 1, 3, 2, 4)          # (batch, bands, n_windows, channels, window)
             plv = w @ w.conj().transpose(-1, -2) / self.window                               # (batch, bands, n_windows, channels, channels)
             plv = plv[..., self.rows, self.cols]                                             # (batch, bands, n_windows, n_pairs)
-            features = torch.cat([plv.real, plv.imag], dim=-1).permute(0, 2, 1, 3).flatten(2)
-        tokens = self.projection(features)
-        batch, n_windows, dim = tokens.shape
-        tokens = self.activation(self.norm(tokens.reshape(-1, dim))).reshape(batch, n_windows, dim)
-        return tokens
+            parts = [plv.real, plv.imag] if self.parts == "both" else [plv.imag]
+            return torch.cat(parts, dim=-1).permute(0, 2, 1, 3).flatten(2)
+
+
+class PhaseLateFusion(PhaseEmbedding):
+    """Summarizes the phase synchrony of a whole trial in one vector.
+
+    The windowed phase-locking features of PhaseEmbedding are averaged over
+    the windows, then passed through a linear layer, BatchNorm, an ELU and
+    dropout. The vector is meant to be concatenated with the pooled encoder
+    output, so the encoder tokens stay unchanged and the windows need no
+    alignment with them.
+
+    Parameters
+    ----------
+    n_channels, n_times, window, stride, bands, sfreq, parts
+        As in PhaseEmbedding. No padding is applied.
+    out_dim : int
+        Length of the output vector.
+    dropout : float
+        Dropout probability applied to the output vector.
+    """
+
+    def __init__(self, n_channels, n_times, out_dim, window, stride, bands, sfreq, parts, dropout):
+        super().__init__(n_channels, n_times, out_dim, window, stride, 0, bands, sfreq, parts)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        """
+        Parameters
+        ----------
+        x : Tensor, shape (batch, n_channels, n_times)
+
+        Returns
+        -------
+        Tensor, shape (batch, out_dim)
+        """
+        features = self._features(x).mean(dim=1)
+        return self.dropout(self.activation(self.norm(self.projection(features))))
 
 
 def sinusoidal_positional_encoding(seq_len, embed_dim, device):
@@ -354,18 +403,26 @@ class PatchTransformer(nn.Module):
         self.region_embed = nn.Parameter(torch.randn(self.n_groups, cfg.embed_dim) * 0.02) if cfg.channel_groups else None
 
         self.phase_embed = None
+        self.phase_late = None
         if cfg.phase_window:
             if not cfg.phase_bands:
                 raise ValueError("phase_window requires phase_bands")
+            if cfg.phase_fusion not in ("sum", "late"):
+                raise ValueError(f"phase_fusion must be 'sum' or 'late', got {cfg.phase_fusion!r}")
             if cfg.channel_groups:
                 raise ValueError("phase_window cannot be combined with channel_groups")
+        if cfg.phase_window and cfg.phase_fusion == "late":
+            if cfg.phase_window > n_times:
+                raise ValueError(f"phase_window of {cfg.phase_window} samples exceeds the {n_times} samples of a trial")
+            self.phase_late = PhaseLateFusion(n_channels, n_times, cfg.embed_dim, cfg.phase_window, patch_stride, cfg.phase_bands, cfg.phase_sfreq, cfg.phase_parts, cfg.dropout)
+        elif cfg.phase_window:
             if cfg.phase_window < window or (cfg.phase_window - window) % 2:
                 raise ValueError(f"phase_window must exceed the token window of {window} samples by an even number of samples")
             pad = (cfg.phase_window - window) // 2
             n_phase = (n_times + 2 * pad - cfg.phase_window) // patch_stride + 1
             if n_phase != self.n_patches:
                 raise ValueError(f"phase_window gives {n_phase} windows but the main tokenizer gives {self.n_patches}")
-            self.phase_embed = PhaseEmbedding(n_channels, n_times, cfg.embed_dim, cfg.phase_window, patch_stride, pad, cfg.phase_bands, cfg.phase_sfreq)
+            self.phase_embed = PhaseEmbedding(n_channels, n_times, cfg.embed_dim, cfg.phase_window, patch_stride, pad, cfg.phase_bands, cfg.phase_sfreq, cfg.phase_parts)
 
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=cfg.embed_dim,
@@ -377,7 +434,13 @@ class PatchTransformer(nn.Module):
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=cfg.n_layers)
 
         self.dropout    = nn.Dropout(cfg.dropout)
-        self.classifier = nn.Linear(cfg.embed_dim, n_classes)
+        if cfg.phase_gate and self.phase_late is None:
+            raise ValueError("phase_gate requires phase_fusion 'late'")
+        if cfg.phase_dropout and self.phase_late is None:
+            raise ValueError("phase_dropout requires phase_fusion 'late'")
+        self.phase_dropout = cfg.phase_dropout
+        self.phase_gate = nn.Linear(cfg.embed_dim, 1) if cfg.phase_gate else None
+        self.classifier = nn.Linear(cfg.embed_dim * (2 if self.phase_late is not None else 1), n_classes)
 
     def forward(self, x, channel_positions=None, ch_names=None):
         """
@@ -404,4 +467,11 @@ class PatchTransformer(nn.Module):
         tokens = tokens + pe.unsqueeze(0)
         tokens = self.encoder(tokens)
         pooled = tokens.mean(dim=1)                                      # average over patch tokens
+        if self.phase_late is not None:
+            phase = self.phase_late(x)
+            if self.training and self.phase_dropout:
+                phase = phase * (torch.rand(phase.shape[0], 1, device=phase.device) >= self.phase_dropout)   # whole vector per sample
+            if self.phase_gate is not None:
+                phase = phase * torch.sigmoid(self.phase_gate(pooled))   # one scalar per sample
+            pooled = torch.cat([pooled, phase], dim=-1)
         return self.classifier(self.dropout(pooled))

@@ -772,7 +772,10 @@ def train_one_subject(subject_id, model_name, cfg: Config, n_folds=1, cropped_cf
          "multiband_kernels": cfg.patch_transformer.multiband_kernels,
          "cov_window": cfg.patch_transformer.cov_window,
          "phase_window": cfg.patch_transformer.phase_window,
-         "phase_bands": cfg.patch_transformer.phase_bands}
+         "phase_bands": cfg.patch_transformer.phase_bands,
+         "phase_parts": cfg.patch_transformer.phase_parts,
+         "phase_fusion": cfg.patch_transformer.phase_fusion,
+         "phase_gate": cfg.patch_transformer.phase_gate}
         if model_name == "patch_transformer" else None
     )
 

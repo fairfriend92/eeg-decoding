@@ -122,11 +122,12 @@ def evaluate_subject(entry, model_name, cfg: Config):
                 f"cov_window {patch_entry.get('cov_window', 0)}, but cfg has "
                 f"{patch_cfg.cov_window}. Pass the same --config used at train time."
             )
-        if (patch_entry.get("phase_window", 0), patch_entry.get("phase_bands")) != (patch_cfg.phase_window, patch_cfg.phase_bands):
+        trained_phase = (patch_entry.get("phase_window", 0), patch_entry.get("phase_bands"), patch_entry.get("phase_parts", "both"), patch_entry.get("phase_fusion", "sum"), patch_entry.get("phase_gate", False))
+        if trained_phase != (patch_cfg.phase_window, patch_cfg.phase_bands, patch_cfg.phase_parts, patch_cfg.phase_fusion, patch_cfg.phase_gate):
             raise ValueError(
                 f"Checkpoint manifest entry for subject {entry['subject']} was trained with "
-                f"phase_window {patch_entry.get('phase_window', 0)} and phase_bands {patch_entry.get('phase_bands')}, "
-                f"but cfg has {patch_cfg.phase_window} and {patch_cfg.phase_bands}. "
+                f"phase_window {trained_phase[0]}, phase_bands {trained_phase[1]}, phase_parts {trained_phase[2]}, phase_fusion {trained_phase[3]} and phase_gate {trained_phase[4]}, "
+                f"but cfg has {patch_cfg.phase_window}, {patch_cfg.phase_bands}, {patch_cfg.phase_parts}, {patch_cfg.phase_fusion} and {patch_cfg.phase_gate}. "
                 "Pass the same --config used at train time."
             )
         if patch_entry.get("multiband_kernels") != patch_cfg.multiband_kernels:

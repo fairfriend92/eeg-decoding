@@ -350,6 +350,21 @@ class PatchTransformerConfig:
     phase_bands : list of list of float, optional
         Frequency bands in Hz, as [low, high] pairs, in which the channel
         phase differences are computed. Required when phase_window is set.
+    phase_parts : str
+        "both" feeds the real and imaginary parts of the phase-locking value to
+        the phase tokens, "imag" the imaginary part alone (lagged coupling,
+        free of zero-lag volume conduction).
+    phase_fusion : str
+        "sum" adds the phase tokens to the patch tokens. "late" averages the
+        phase features over the trial and concatenates their embedding with
+        the pooled encoder output before the classifier.
+    phase_gate : bool
+        Scales the late-fused phase vector by a sigmoid scalar per sample,
+        computed from the pooled encoder output. Requires phase_fusion "late".
+    phase_dropout : float
+        Probability, during training only, of zeroing the whole late-fused
+        phase vector of a sample, so the classifier also learns to work from
+        the encoder alone. Requires phase_fusion "late".
     phase_sfreq : float
         Sampling rate in Hz that phase_bands refer to. Set by make_config
         from data.resample_freq.
@@ -386,6 +401,10 @@ class PatchTransformerConfig:
     phase_window: int = 0
     phase_window_ms: float = 0.0
     phase_bands: list = None
+    phase_parts: str = "both"
+    phase_fusion: str = "sum"
+    phase_gate: bool = False
+    phase_dropout: float = 0.0
     phase_sfreq: float = 0.0
     embed_dim: int = 64
     n_heads: int = 8
