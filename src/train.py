@@ -40,6 +40,7 @@ from sklearn.metrics import accuracy_score, cohen_kappa_score
 from sklearn.model_selection import StratifiedKFold, train_test_split
 from torch.utils.data import DataLoader, TensorDataset
 
+from augment import augment_batch
 from config import OUTPUT_DIR, Config, add_dataset_cli_args, make_config, resolve_config
 from csp_init import csp_initialize
 from data_loader import crop_trials, get_subject_data, get_subject_validation_data
@@ -574,6 +575,7 @@ def fit_full(X, y, model_name, cfg: Config, n_epochs, subject_id=None, seed=None
         seed = cfg.train.seed if subject_id is None else cfg.train.seed + subject_id
     torch.manual_seed(seed)
     loader_generator = torch.Generator().manual_seed(seed)
+    augment_generator = torch.Generator().manual_seed(seed)
 
     if cropped_cfg is not None:
         X_input, y_input, _ = crop_trials(X, y, cropped_cfg.crop_size, cropped_cfg.crop_stride)
@@ -607,6 +609,7 @@ def fit_full(X, y, model_name, cfg: Config, n_epochs, subject_id=None, seed=None
     for epoch in range(n_epochs):
         for xb, yb in loader:
             xb, yb = xb.to(device), yb.to(device)
+            xb, yb = augment_batch(xb, yb, cfg.augment, cfg.data.resample_freq, augment_generator)
             optimizer.zero_grad()
             loss = criterion(model(xb), yb)
             loss.backward()

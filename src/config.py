@@ -515,6 +515,40 @@ class TrainConfig:
 
 
 @dataclass
+class AugmentConfig:
+    """Training-time augmentation of the final fixed-epoch fit.
+
+    Each technique is off at its default of 0 and is applied to every training
+    batch on the fly. Validation and test windows are never augmented.
+
+    Parameters
+    ----------
+    time_shift_ms : float
+        Maximum random shift of each window, in milliseconds, in either
+        direction. The vacated samples are zero, the mean of a z-scored window.
+    noise_std : float
+        Standard deviation of added Gaussian noise, as a fraction of each
+        window's own standard deviation.
+    amp_scale : float
+        Each window is multiplied by a factor drawn uniformly from
+        [1 - amp_scale, 1 + amp_scale].
+    sr_segments : int
+        Segmentation and recombination. Each window is cut into this many
+        equal segments, and each segment is swapped with the same segment of a
+        random window of the same class in the batch.
+    keep_original : bool
+        Appends the augmented copies to the clean windows of each batch and
+        shuffles the two together, doubling the batch size.
+    """
+
+    time_shift_ms: float = 0.0
+    noise_std: float = 0.0
+    amp_scale: float = 0.0
+    sr_segments: int = 0
+    keep_original: bool = False
+
+
+@dataclass
 class Config:
     """Top-level configuration aggregating all sub-configs."""
 
@@ -524,6 +558,7 @@ class Config:
     eegnet:    EEGNetConfig     = field(default_factory=EEGNetConfig)
     train:     TrainConfig      = field(default_factory=TrainConfig)
     cropped:   CroppedConfig    = field(default_factory=CroppedConfig)
+    augment:   AugmentConfig    = field(default_factory=AugmentConfig)
 
 
 def make_config(dataset="bci2a", model=None, overrides=None):
