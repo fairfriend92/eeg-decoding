@@ -539,6 +539,15 @@ class AugmentConfig:
     keep_original : bool
         Appends the augmented copies to the clean windows of each batch and
         shuffles the two together, doubling the batch size.
+    consistency_weight : float
+        Weight of a KL term that pulls the output probabilities of each
+        augmented copy towards those of its clean window, which are held
+        fixed. Above 0 each batch holds the clean windows and their copies,
+        whatever keep_original is.
+    mixup_alpha : float
+        Concentration of the Beta(alpha, alpha) blend weight of mixup. Above 0
+        each batch holds the clean windows and an equal number of mixed
+        windows, each blended with a random partner window and its label.
     """
 
     time_shift_ms: float = 0.0
@@ -546,6 +555,8 @@ class AugmentConfig:
     amp_scale: float = 0.0
     sr_segments: int = 0
     keep_original: bool = False
+    consistency_weight: float = 0.0
+    mixup_alpha: float = 0.0
 
 
 @dataclass

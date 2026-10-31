@@ -1,0 +1,19 @@
+patch_transformer:
+  patch_size_ms: 100
+  patch_stride_ms: 40
+  multiband_kernels_ms: [100, 200, 400]
+  phase_window_ms: 500
+  phase_parts: both
+  phase_fusion: late
+  phase_dropout: 0.25
+  phase_bands:
+    - [4, 8]
+    - [8, 13]
+    - [13, 30]
+  n_layers: 2
+  embed_dim: 128
+  ff_dim: 512
+
+augment:
+  noise_std: 0.5
+  keep_original: true

@@ -5,6 +5,7 @@ device. Randomness comes from a CPU generator so a run is reproducible whatever
 the device.
 """
 
+import numpy as np
 import torch
 
 from config import AugmentConfig
@@ -71,3 +72,34 @@ def augment_batch(x, y, cfg: AugmentConfig, sample_rate, generator):
         order = torch.randperm(len(y), generator=generator).to(x.device)
         x, y = x[order], y[order]
     return x, y
+
+
+def mixup_batch(x, y, alpha, n_classes, generator):
+    """Blends every window with a random partner of the same batch.
+
+    Parameters
+    ----------
+    x : Tensor, shape (batch, n_channels, n_times)
+        Training windows.
+    y : Tensor, shape (batch,)
+        Integer labels.
+    alpha : float
+        Concentration of the Beta(alpha, alpha) blend weight.
+    n_classes : int
+        Number of classes, sizing the soft labels.
+    generator : torch.Generator
+        CPU generator that drives the partner choice and the blend weights.
+
+    Returns
+    -------
+    x_mixed : Tensor, shape (batch, n_channels, n_times)
+        Blended windows.
+    y_mixed : Tensor, shape (batch, n_classes)
+        Blended one-hot labels.
+    """
+    partner = torch.randperm(len(y), generator=generator).to(x.device)
+    rng = np.random.default_rng(int(torch.randint(2**31, (1,), generator=generator)))
+    lam = torch.from_numpy(rng.beta(alpha, alpha, size=len(y))).float().to(x.device)
+    x_mixed = lam.view(-1, 1, 1) * x + (1 - lam.view(-1, 1, 1)) * x[partner]
+    onehot = torch.nn.functional.one_hot(y, n_classes).float()
+    return x_mixed, lam.view(-1, 1) * onehot + (1 - lam.view(-1, 1)) * onehot[partner]

@@ -29,6 +29,7 @@ imports used throughout src/.
 """
 
 import argparse
+import dataclasses
 import json
 import math
 from pathlib import Path
@@ -36,11 +37,12 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from sklearn.metrics import accuracy_score, cohen_kappa_score
 from sklearn.model_selection import StratifiedKFold, train_test_split
 from torch.utils.data import DataLoader, TensorDataset
 
-from augment import augment_batch
+from augment import augment_batch, mixup_batch
 from config import OUTPUT_DIR, Config, add_dataset_cli_args, make_config, resolve_config
 from csp_init import csp_initialize
 from data_loader import crop_trials, get_subject_data, get_subject_validation_data
@@ -312,6 +314,44 @@ def evaluate_ensemble_cropped(models, X, y, cropped_cfg, device, batch_size):
 
 
 
+def augmented_loss(model, xb, yb, criterion, cfg: Config, pair_augment, generator):
+    """Computes the training loss of one batch under the enabled augmentation.
+
+    Parameters
+    ----------
+    model : nn.Module
+        Model in training mode.
+    xb, yb : Tensor
+        Clean windows and integer labels, already on the model's device.
+    criterion : nn.CrossEntropyLoss
+        Loss on hard or blended labels.
+    cfg : Config
+        Full project configuration. Its `augment` section selects the technique.
+    pair_augment : AugmentConfig
+        cfg.augment with keep_original off, used to build the augmented copy of
+        a clean/augmented pair so the batch is not doubled twice.
+    generator : torch.Generator
+        CPU generator that drives the augmentation draws.
+
+    Returns
+    -------
+    Tensor
+        Scalar loss.
+    """
+    if cfg.augment.consistency_weight:
+        x_aug, _ = augment_batch(xb, yb, pair_augment, cfg.data.resample_freq, generator)
+        logits = model(torch.cat([xb, x_aug]))
+        clean_logits, aug_logits = logits.chunk(2)
+        consistency = F.kl_div(F.log_softmax(aug_logits, dim=1), F.softmax(clean_logits, dim=1).detach(), reduction="batchmean")
+        return criterion(logits, torch.cat([yb, yb])) + cfg.augment.consistency_weight * consistency
+    if cfg.augment.mixup_alpha:
+        x_mixed, y_mixed = mixup_batch(xb, yb, cfg.augment.mixup_alpha, cfg.data.n_classes, generator)
+        targets = torch.cat([F.one_hot(yb, cfg.data.n_classes).float(), y_mixed])
+        return criterion(model(torch.cat([xb, x_mixed])), targets)
+    xb, yb = augment_batch(xb, yb, cfg.augment, cfg.data.resample_freq, generator)
+    return criterion(model(xb), yb)
+
+
 def fit_on_split(X_train, y_train, X_val, y_val, model_name, cfg: Config, subject_id=None, seed=None, cropped_cfg=None, csp_init=False, init_state=None):
     """Trains a single model on an explicit train/val split, with early
     stopping.
@@ -368,6 +408,7 @@ def fit_on_split(X_train, y_train, X_val, y_val, model_name, cfg: Config, subjec
         seed = cfg.train.seed if subject_id is None else cfg.train.seed + subject_id
     torch.manual_seed(seed)
     loader_generator = torch.Generator().manual_seed(seed)
+    augment_generator = torch.Generator().manual_seed(seed)
 
     if cropped_cfg is not None:
         X_train_input, y_train_input, _ = crop_trials(X_train, y_train, cropped_cfg.crop_size, cropped_cfg.crop_stride)
@@ -401,6 +442,7 @@ def fit_on_split(X_train, y_train, X_val, y_val, model_name, cfg: Config, subjec
         f"validating on {len(X_val)} trials, device={device}"
     )
 
+    pair_augment = dataclasses.replace(cfg.augment, keep_original=False)
     best_val_acc       = -1.0
     best_state         = None
     best_epoch         = 0
@@ -411,7 +453,7 @@ def fit_on_split(X_train, y_train, X_val, y_val, model_name, cfg: Config, subjec
         for xb, yb in train_loader:
             xb, yb = xb.to(device), yb.to(device)
             optimizer.zero_grad()
-            loss = criterion(model(xb), yb)
+            loss = augmented_loss(model, xb, yb, criterion, cfg, pair_augment, augment_generator)
             loss.backward()
             optimizer.step()
 
@@ -605,13 +647,14 @@ def fit_full(X, y, model_name, cfg: Config, n_epochs, subject_id=None, seed=None
     unit = "crops" if cropped_cfg is not None else "trials"
     print(f"[{model_name}] {label}: final fit on {len(X_input)} {unit} for {n_epochs} epochs (no validation split)")
 
+    # The pair is built here, so the batch is not also doubled inside augment_batch.
+    pair_augment = dataclasses.replace(cfg.augment, keep_original=False)
     model.train()
     for epoch in range(n_epochs):
         for xb, yb in loader:
             xb, yb = xb.to(device), yb.to(device)
-            xb, yb = augment_batch(xb, yb, cfg.augment, cfg.data.resample_freq, augment_generator)
             optimizer.zero_grad()
-            loss = criterion(model(xb), yb)
+            loss = augmented_loss(model, xb, yb, criterion, cfg, pair_augment, augment_generator)
             loss.backward()
             optimizer.step()
         if epoch % 10 == 0 or epoch == n_epochs - 1:
