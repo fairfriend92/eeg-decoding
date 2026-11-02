@@ -47,6 +47,18 @@ ensure_session() {
         local new_args=("${SESSION_ARGS[@]}")
         [[ -n "$GPU" ]] && new_args+=(--gpu "$GPU")
         "$COLAB" new "${new_args[@]}"
+    else
+        echo "== reusing session${SESSION:+ '${SESSION}'} =="
+    fi
+}
+
+# Stops the session when the caller's STOP is 1 (its --stop flag), otherwise
+# leaves it running so the next run reuses it. Requires SESSION_ARGS to be set.
+finish_session() {
+    if [[ "${STOP:-0}" -eq 1 ]]; then
+        "$COLAB" stop "${SESSION_ARGS[@]}"
+    else
+        echo "== session kept running, pass --stop to close it at the end =="
     fi
 }
 

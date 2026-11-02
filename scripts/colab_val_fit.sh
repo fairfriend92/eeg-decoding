@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
-# Trains validation-slice-excluded models (src/train.py --val-fit) on a fresh
-# Colab session, then downloads only the resulting *_valfit.pt checkpoints
-# and stops the session. The model's local checkpoint manifest is uploaded
+# Trains validation-slice-excluded models (src/train.py --val-fit) on a Colab
+# session, then downloads only the resulting *_valfit.pt checkpoints. The model's local checkpoint manifest is uploaded
 # first, since --val-fit reads it. Run dump_predictions.py locally afterwards.
 #
 # The run is wrapped in a periodic heartbeat print. The call's --timeout is a
 # large client-side ceiling, not an estimate of the run time.
 #
 # Usage:
-#   scripts/colab_val_fit.sh -s SESSION --gpu TYPE --model MODEL --dataset DATASET [--config FILE]
+#   scripts/colab_val_fit.sh -s SESSION --gpu TYPE --model MODEL --dataset DATASET [--config FILE] [--stop]
+#
+# --stop closes the session at the end. Without it the session stays up and the
+# next run reuses it.
 #
 # Example:
 #   scripts/colab_val_fit.sh -s valfit-conformer --gpu A100 --model conformer --dataset dreyer2023
@@ -16,6 +18,7 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/_colab_common.sh"
 
 SESSION=""
+STOP=0
 GPU=""
 MODEL=""
 DATASET=""
@@ -28,7 +31,8 @@ while [[ $# -gt 0 ]]; do
         --model) MODEL="$2"; shift 2 ;;
         --dataset) DATASET="$2"; shift 2 ;;
         --config) CONFIG="$2"; shift 2 ;;
-        -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
+        --stop) STOP=1; shift ;;
+        -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
         *) echo "Unknown argument: $1" >&2; exit 1 ;;
     esac
 done
@@ -96,5 +100,5 @@ while IFS= read -r remote_file; do
     "$COLAB" download "${SESSION_ARGS[@]}" "$remote_file" "${REPO_ROOT}/output/${DATASET}/checkpoints/$(basename "$remote_file")"
 done <<< "$remote_files"
 
-"$COLAB" stop "${SESSION_ARGS[@]}"
+finish_session
 echo "done"

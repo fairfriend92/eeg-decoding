@@ -4,7 +4,12 @@
 # needed for this investigation), syncs src/ and this script, then runs it.
 #
 # Usage:
-#   scripts/colab_neuralbench.sh [-s SESSION] [--gpu TYPE] [--skip-sync] -- [neuralbench_eval.py args...]
+#   scripts/colab_neuralbench.sh -s SESSION [--gpu TYPE] [--skip-sync] -- [neuralbench_eval.py args...]
+#
+# Every run uses a new session and stops it after a successful run. SESSION must
+# not name a live session, because a reused session ran the same prepare pass
+# several times slower. A failed run leaves its session up, since its kernel may
+# still be running; stop it with `colab stop` before the next run.
 #
 # NeuralBench's DATA_DIR/SAVE_DIR/CACHE_DIR all point directly at Drive
 # (DRIVE_ROOT/neuralbench_data, DRIVE_ROOT/neuralbench_results,
@@ -50,7 +55,7 @@ while [[ $# -gt 0 ]]; do
         --skip-sync) SKIP_SYNC=1; shift ;;
         --) shift; NB_ARGS=("$@"); break ;;
         -h|--help)
-            sed -n '2,12p' "$0"; exit 0 ;;
+            sed -n '2,38p' "$0"; exit 0 ;;
         *) echo "Unknown argument: $1 (neuralbench_eval.py args go after --)" >&2; exit 1 ;;
     esac
 done
@@ -79,6 +84,12 @@ done
 # checkpoint timestamps; to stop one, use `colab restart-kernel` or
 # `colab stop` on the busy session directly rather than a client timeout.
 EXEC_TIMEOUT=86400
+
+[[ -z "$SESSION" ]] && { echo "-s is required" >&2; exit 1; }
+if "$COLAB" sessions 2>/dev/null | grep -qF "[${SESSION}]"; then
+    echo "Session '${SESSION}' already exists. Stop it or pick another name." >&2
+    exit 1
+fi
 
 prepare_session
 
@@ -166,4 +177,6 @@ PYEOF
 echo "== running neuralbench_eval.py ${NB_ARGS[*]:-} =="
 "$COLAB" exec "${SESSION_ARGS[@]}" -f "$BOOTSTRAP" --timeout "$EXEC_TIMEOUT"
 
+STOP=1
+finish_session
 echo "done"

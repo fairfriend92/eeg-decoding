@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 # Fits the patch transformer for a Codabench submission (src/export_submission.py)
-# on a fresh Colab session, downloads output/DATASET/submission/weights.pt and
-# stops the session.
+# on a Colab session, downloads output/DATASET/submission/weights.pt.
 #
 # Epoched participants are cached on Drive. The run is wrapped in a periodic
 # heartbeat print. The call's --timeout is a large client-side ceiling, not an
 # estimate of the run time.
 #
 # Usage:
-#   scripts/colab_export_submission.sh -s SESSION --gpu TYPE --dataset DATASET [--config FILE] [--set "KEY=VALUE ..."] [--epochs N] [--all-participants]
+#   scripts/colab_export_submission.sh -s SESSION --gpu TYPE --dataset DATASET [--config FILE] [--set "KEY=VALUE ..."] [--epochs N] [--all-participants] [--stop]
+#
+# --stop closes the session at the end. Without it the session stays up and the
+# next run reuses it.
 #
 # --epochs N fixes the epoch count of the final fit and skips the early-stopped
 # fit that otherwise sets it.
@@ -23,6 +25,7 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/_colab_common.sh"
 
 SESSION=""
+STOP=0
 GPU=""
 DATASET=""
 CONFIG=""
@@ -39,7 +42,8 @@ while [[ $# -gt 0 ]]; do
         --set) SETS="$2"; shift 2 ;;
         --epochs) EPOCHS="$2"; shift 2 ;;
         --all-participants) ALL=1; shift ;;
-        -h|--help) sed -n '2,21p' "$0"; exit 0 ;;
+        --stop) STOP=1; shift ;;
+        -h|--help) sed -n '2,23p' "$0"; exit 0 ;;
         *) echo "Unknown argument: $1" >&2; exit 1 ;;
     esac
 done
@@ -122,5 +126,5 @@ WEIGHTS_NAME="weights.pt"
 echo "== downloading ${WEIGHTS_NAME} =="
 "$COLAB" download "${SESSION_ARGS[@]}" "${REMOTE_OUT}/submission/${WEIGHTS_NAME}" "${REPO_ROOT}/output/${DATASET}/submission/${WEIGHTS_NAME}"
 
-"$COLAB" stop "${SESSION_ARGS[@]}"
+finish_session
 echo "done"

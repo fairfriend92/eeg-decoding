@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
-# Fits one neural member per fold on a fresh Colab session, replays the test
+# Fits one neural member per fold on a Colab session, replays the test
 # streams window by window under each test-time adaptation variant
 # (src/test_time_adapt.py) and downloads
 # output/DATASET/cross_subject/predictions_MEMBER<suffix>_tta_VARIANT<tag><fold>.npz
-# for none, abn and tent, then stops the session.
+# for none, abn and tent.
 #
 # The run is wrapped in a periodic heartbeat print. The call's --timeout is a
 # large client-side ceiling, not an estimate of the run time.
 #
 # Usage:
-#   scripts/colab_test_time_adapt.sh -s SESSION --gpu TYPE --dataset DATASET --member MEMBER --epochs N [--kfold K] [--config FILE] [--set "KEY=VALUE ..."] [--suffix SUFFIX] [--n-folds N] [--exclude "ID ..."] [--tag TAG] [--lr LR] [--prior-windows K]
+#   scripts/colab_test_time_adapt.sh -s SESSION --gpu TYPE --dataset DATASET --member MEMBER --epochs N [--kfold K] [--config FILE] [--set "KEY=VALUE ..."] [--suffix SUFFIX] [--n-folds N] [--exclude "ID ..."] [--tag TAG] [--lr LR] [--prior-windows K] [--stop]
+#
+# --stop closes the session at the end. Without it the session stays up and the
+# next run reuses it.
 #
 # --suffix is the dump file-name suffix the --set overrides produce
 # (_ea_testcausal for data.alignment=euclidean data.test_alignment=causal).
@@ -22,6 +25,7 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/_colab_common.sh"
 
 SESSION=""
+STOP=0
 GPU=""
 DATASET=""
 MEMBER=""
@@ -52,7 +56,8 @@ while [[ $# -gt 0 ]]; do
         --exclude) EXCLUDE="$2"; shift 2 ;;
         --tag) TAG="$2"; shift 2 ;;
         --epochs) EPOCHS="$2"; shift 2 ;;
-        -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
+        --stop) STOP=1; shift ;;
+        -h|--help) sed -n '2,23p' "$0"; exit 0 ;;
         *) echo "Unknown argument: $1" >&2; exit 1 ;;
     esac
 done
@@ -149,5 +154,5 @@ for variant in none abn tent; do
     done
 done
 
-"$COLAB" stop "${SESSION_ARGS[@]}"
+finish_session
 echo "done"

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Fits cross-subject ensemble members (src/cross_subject_members.py) on a fresh
-# Colab session, downloads output/DATASET/cross_subject/predictions_MEMBER.npz
-# for each and stops the session.
+# Fits cross-subject ensemble members (src/cross_subject_members.py) on a Colab
+# session, downloads output/DATASET/cross_subject/predictions_MEMBER.npz
+# for each.
 #
 # Epoched participants are cached on Drive, so rerunning on a new session
 # after an interruption skips the slow epoching.
@@ -10,7 +10,10 @@
 # large client-side ceiling, not an estimate of the run time.
 #
 # Usage:
-#   scripts/colab_cross_subject_members.sh -s SESSION --gpu TYPE --dataset DATASET --members "MEMBER ..." [--config FILE] [--set "KEY=VALUE ..."] [--suffix SUFFIX] [--n-folds N] [--kfold K] [--early-stop-all] [--ensemble] [--exclude "ID ..."] [--tag TAG] [--epochs N] [--weights]
+#   scripts/colab_cross_subject_members.sh -s SESSION --gpu TYPE --dataset DATASET --members "MEMBER ..." [--config FILE] [--set "KEY=VALUE ..."] [--suffix SUFFIX] [--n-folds N] [--kfold K] [--early-stop-all] [--ensemble] [--exclude "ID ..."] [--tag TAG] [--epochs N] [--weights] [--lrs "LR ..."] [--stop]
+#
+# --stop closes the session at the end. Without it the session stays up and the
+# next run reuses it.
 #
 # --set passes config overrides through. --suffix is the dump file-name suffix
 # those overrides produce (_ea for data.alignment=euclidean), so the download
@@ -31,6 +34,10 @@
 # dict) for a single dump.
 # --epochs N fixes the epoch count of the neural members' final fit and skips
 # the early-stopped fit that otherwise sets it.
+# --lrs runs the whole job once per learning rate in the one session, each
+# started on the VM when the previous one ends, with patch_transformer.lr set
+# to that value and "_lr<LR>" appended to the tag, which the download then
+# expects. Without --lrs the config's learning rate is used.
 #
 # Example:
 #   scripts/colab_cross_subject_members.sh -s xsubj --gpu A100 --dataset dreyer2023 --members "patch_transformer"
@@ -38,6 +45,7 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/_colab_common.sh"
 
 SESSION=""
+STOP=0
 GPU=""
 DATASET=""
 MEMBERS=""
@@ -52,6 +60,7 @@ EXCLUDE=""
 TAG=""
 EPOCHS=""
 WEIGHTS=0
+LRS=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -70,7 +79,9 @@ while [[ $# -gt 0 ]]; do
         --tag) TAG="$2"; shift 2 ;;
         --epochs) EPOCHS="$2"; shift 2 ;;
         --weights) WEIGHTS=1; shift ;;
-        -h|--help) sed -n '2,35p' "$0"; exit 0 ;;
+        --lrs) LRS="$2"; shift 2 ;;
+        --stop) STOP=1; shift ;;
+        -h|--help) sed -n '2,43p' "$0"; exit 0 ;;
         *) echo "Unknown argument: $1" >&2; exit 1 ;;
     esac
 done
@@ -105,9 +116,9 @@ echo "import os; os.makedirs('${REMOTE_OUT}', exist_ok=True)" | "$COLAB" exec "$
 SCRATCH="$(mktemp -d)"
 trap 'rm -rf "$SCRATCH"' EXIT
 BOOTSTRAP="${SCRATCH}/bootstrap.py"
-python3 - "$REMOTE_ROOT" "$DRIVE_DATA_DIR" "$DRIVE_ROOT" "$DATASET" "$MEMBERS" "$CONFIG" "$SETS" "$N_FOLDS" "$KFOLD" "$ES_ALL" "$ENSEMBLE" "$EXCLUDE" "$TAG" "$EPOCHS" > "$BOOTSTRAP" <<'PYEOF'
+python3 - "$REMOTE_ROOT" "$DRIVE_DATA_DIR" "$DRIVE_ROOT" "$DATASET" "$MEMBERS" "$CONFIG" "$SETS" "$N_FOLDS" "$KFOLD" "$ES_ALL" "$ENSEMBLE" "$EXCLUDE" "$TAG" "$EPOCHS" "$LRS" > "$BOOTSTRAP" <<'PYEOF'
 import sys, json
-remote_root, drive_data_dir, drive_root, dataset, members, config, sets, n_folds, kfold, es_all, ensemble, exclude, tag, epochs = sys.argv[1:15]
+remote_root, drive_data_dir, drive_root, dataset, members, config, sets, n_folds, kfold, es_all, ensemble, exclude, tag, epochs, lrs = sys.argv[1:16]
 remote_src = remote_root + '/src'
 args = members.split() + ['--dataset', dataset, '--n-jobs', '2', '--cache-dir', drive_root + '/output/' + dataset]
 if config:
@@ -124,10 +135,12 @@ if int(ensemble):
     args += ['--ensemble']
 if exclude.split():
     args += ['--exclude-subjects'] + exclude.split()
-if tag:
-    args += ['--tag', tag]
 if epochs:
     args += ['--epochs', epochs]
+# One run per learning rate, each tagged so its dumps do not overwrite the others.
+runs = [args + (['--tag', tag] if tag else [])]
+if lrs.split():
+    runs = [args + ['--set', 'patch_transformer.lr=' + lr, '--tag', tag + '_lr' + lr] for lr in lrs.split()]
 print(f"""import sys, os, time, threading
 os.makedirs({drive_data_dir!r}, exist_ok=True)
 os.environ['MNE_DATA'] = {drive_data_dir!r}
@@ -137,7 +150,7 @@ for _name, _mod in list(sys.modules.items()):
     _file = getattr(_mod, '__file__', None)
     if _file and _file.startswith({remote_src!r}):
         del sys.modules[_name]
-sys.argv = ['cross_subject_members.py'] + {json.dumps(args)}
+_runs = {json.dumps(runs)}
 
 _stop = threading.Event()
 def _heartbeat():
@@ -146,9 +159,13 @@ def _heartbeat():
         print(f"[heartbeat] {{int(time.time() - t0)}}s", flush=True)
 threading.Thread(target=_heartbeat, daemon=True).start()
 try:
-    exec(compile(open('cross_subject_members.py').read(), 'cross_subject_members.py', 'exec'))
-except SystemExit:
-    pass
+    for _i, _run in enumerate(_runs):
+        print(f"== run {{_i + 1}}/{{len(_runs)}}: {{' '.join(_run)}} ==", flush=True)
+        sys.argv = ['cross_subject_members.py'] + _run
+        try:
+            exec(compile(open('cross_subject_members.py').read(), 'cross_subject_members.py', 'exec'))
+        except SystemExit:
+            pass
 finally:
     _stop.set()""")
 PYEOF
@@ -162,31 +179,39 @@ KFOLD_TAG=""
 [[ "$ES_ALL" -eq 1 ]] && KFOLD_TAG="_esall"
 FOLD_SUFFIXES=("")
 [[ "$N_FOLDS" -gt 0 ]] && FOLD_SUFFIXES=($(for ((k = 0; k < N_FOLDS; k++)); do echo "_f${k}"; done))
+RUN_TAGS=("$TAG")
+[[ -n "$LRS" ]] && RUN_TAGS=($(for lr in $LRS; do echo "${TAG}_lr${lr}"; done))
 for member in $MEMBERS; do
-    for fold in "${FOLD_SUFFIXES[@]}"; do
-        echo "== downloading predictions_${member}${SUFFIX}${KFOLD_TAG}${TAG}${fold}.npz =="
-        "$COLAB" download "${SESSION_ARGS[@]}" "${REMOTE_OUT}/cross_subject/predictions_${member}${SUFFIX}${KFOLD_TAG}${TAG}${fold}.npz" "${REPO_ROOT}/output/${DATASET}/cross_subject/predictions_${member}${SUFFIX}${KFOLD_TAG}${TAG}${fold}.npz"
+    for run_tag in "${RUN_TAGS[@]}"; do
+        for fold in "${FOLD_SUFFIXES[@]}"; do
+            echo "== downloading predictions_${member}${SUFFIX}${KFOLD_TAG}${run_tag}${fold}.npz =="
+            "$COLAB" download "${SESSION_ARGS[@]}" "${REMOTE_OUT}/cross_subject/predictions_${member}${SUFFIX}${KFOLD_TAG}${run_tag}${fold}.npz" "${REPO_ROOT}/output/${DATASET}/cross_subject/predictions_${member}${SUFFIX}${KFOLD_TAG}${run_tag}${fold}.npz"
+        done
     done
 done
 
 if [[ "$WEIGHTS" -eq 1 && "$KFOLD" -eq 0 && "$ES_ALL" -eq 0 ]]; then
     for member in $MEMBERS; do
         [[ "$member" =~ ^(eegnet|patch_transformer|conformer)$ ]] || continue
-        for fold in "${FOLD_SUFFIXES[@]}"; do
-            echo "== downloading weights_${member}${SUFFIX}${TAG}${fold}.pt =="
-            "$COLAB" download "${SESSION_ARGS[@]}" "${REMOTE_OUT}/cross_subject/weights_${member}${SUFFIX}${TAG}${fold}.pt" "${REPO_ROOT}/output/${DATASET}/cross_subject/weights_${member}${SUFFIX}${TAG}${fold}.pt"
+        for run_tag in "${RUN_TAGS[@]}"; do
+            for fold in "${FOLD_SUFFIXES[@]}"; do
+                echo "== downloading weights_${member}${SUFFIX}${run_tag}${fold}.pt =="
+                "$COLAB" download "${SESSION_ARGS[@]}" "${REMOTE_OUT}/cross_subject/weights_${member}${SUFFIX}${run_tag}${fold}.pt" "${REPO_ROOT}/output/${DATASET}/cross_subject/weights_${member}${SUFFIX}${run_tag}${fold}.pt"
+            done
         done
     done
 fi
 
 if [[ "$WEIGHTS" -eq 1 && "$KFOLD" -gt 0 ]]; then
     for member in $MEMBERS; do
-        for fold in "${FOLD_SUFFIXES[@]}"; do
-            echo "== downloading weights_${member}${SUFFIX}${KFOLD_TAG}${TAG}${fold}.pt =="
-            "$COLAB" download "${SESSION_ARGS[@]}" "${REMOTE_OUT}/cross_subject/weights_${member}${SUFFIX}${KFOLD_TAG}${TAG}${fold}.pt" "${REPO_ROOT}/output/${DATASET}/cross_subject/weights_${member}${SUFFIX}${KFOLD_TAG}${TAG}${fold}.pt"
+        for run_tag in "${RUN_TAGS[@]}"; do
+            for fold in "${FOLD_SUFFIXES[@]}"; do
+                echo "== downloading weights_${member}${SUFFIX}${KFOLD_TAG}${run_tag}${fold}.pt =="
+                "$COLAB" download "${SESSION_ARGS[@]}" "${REMOTE_OUT}/cross_subject/weights_${member}${SUFFIX}${KFOLD_TAG}${run_tag}${fold}.pt" "${REPO_ROOT}/output/${DATASET}/cross_subject/weights_${member}${SUFFIX}${KFOLD_TAG}${run_tag}${fold}.pt"
+            done
         done
     done
 fi
 
-"$COLAB" stop "${SESSION_ARGS[@]}"
+finish_session
 echo "done"

@@ -103,8 +103,11 @@ cache keys stay stable across sessions), syncs `src/` and
 `scripts/neuralbench_eval.py`, then runs the latter on the session:
 
 ```
-scripts/colab_neuralbench.sh [-s SESSION] [--gpu TYPE] [--skip-sync] -- [neuralbench_eval.py args]
+scripts/colab_neuralbench.sh -s SESSION [--gpu TYPE] [--skip-sync] -- [neuralbench_eval.py args]
 ```
+
+Each run creates a new session, which must not already exist, and stops it after
+a successful run.
 
 `NEURALBENCH_DATA_DIR`/`SAVE_DIR`/`CACHE_DIR` all point directly at the
 session's mounted Drive, so a download or checkpoint is durable the moment

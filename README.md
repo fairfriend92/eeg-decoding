@@ -347,7 +347,7 @@ Dumps are written to `output/dreyer2023/cross_subject/`, with `_ea` appended
 to the name for Euclidean alignment and `_ra` for Riemannian recentering (plus
 `_n64` when `data.alignment_n_trials=64`). The pooled fits need about 8 GB of
 memory. The neural members and REVE run on a Colab A100, which downloads the
-dump and stops the session:
+dump. The session stays up for the next run, and `--stop` closes it at the end:
 ```
 scripts/colab_cross_subject_members.sh -s SESSION --gpu A100 --dataset dreyer2023 --members eegnet --set data.alignment=euclidean --suffix _ea
 scripts/colab_cross_subject_members.sh -s SESSION --gpu A100 --dataset dreyer2023 --members patch_transformer --config patch_overlap.yaml

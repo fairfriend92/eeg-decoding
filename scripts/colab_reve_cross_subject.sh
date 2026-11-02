@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Fine-tunes REVE on pooled participants (src/reve_cross_subject.py) on a fresh
-# Colab session, downloads output/DATASET/cross_subject/predictions_reve_finetuned.npz
-# and stops the session.
+# Fine-tunes REVE on pooled participants (src/reve_cross_subject.py) on a Colab
+# session, downloads output/DATASET/cross_subject/predictions_reve_finetuned.npz.
 #
 # Epoched participants and the validation-fit probabilities are cached on Drive,
 # so rerunning on a new session after an interruption resumes instead of
@@ -11,7 +10,10 @@
 # large client-side ceiling, not an estimate of the run time.
 #
 # Usage:
-#   scripts/colab_reve_cross_subject.sh -s SESSION --gpu TYPE --dataset DATASET [--config FILE]
+#   scripts/colab_reve_cross_subject.sh -s SESSION --gpu TYPE --dataset DATASET [--config FILE] [--stop]
+#
+# --stop closes the session at the end. Without it the session stays up and the
+# next run reuses it.
 #
 # Example:
 #   scripts/colab_reve_cross_subject.sh -s reve-xsubj --gpu A100 --dataset dreyer2023
@@ -19,6 +21,7 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/_colab_common.sh"
 
 SESSION=""
+STOP=0
 GPU=""
 DATASET=""
 CONFIG=""
@@ -29,7 +32,8 @@ while [[ $# -gt 0 ]]; do
         --gpu) GPU="$2"; shift 2 ;;
         --dataset) DATASET="$2"; shift 2 ;;
         --config) CONFIG="$2"; shift 2 ;;
-        -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
+        --stop) STOP=1; shift ;;
+        -h|--help) sed -n '2,19p' "$0"; exit 0 ;;
         *) echo "Unknown argument: $1" >&2; exit 1 ;;
     esac
 done
@@ -87,5 +91,5 @@ echo "== downloading predictions_reve_finetuned.npz =="
 mkdir -p "${REPO_ROOT}/output/${DATASET}/cross_subject"
 "$COLAB" download "${SESSION_ARGS[@]}" "${REMOTE_OUT}/cross_subject/predictions_reve_finetuned.npz" "${REPO_ROOT}/output/${DATASET}/cross_subject/predictions_reve_finetuned.npz"
 
-"$COLAB" stop "${SESSION_ARGS[@]}"
+finish_session
 echo "done"
