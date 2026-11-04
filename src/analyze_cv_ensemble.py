@@ -12,10 +12,10 @@ so it bounds what any per-participant selection can reach and is not a result.
 import argparse
 
 import numpy as np
-from sklearn.metrics import balanced_accuracy_score
 
 from config import OUTPUT_DIR
 from ensemble_harness import all_subsets, subset_score
+from scoring import balanced_accuracy
 
 
 def load_folds(dataset, members, suffix, n_folds):
@@ -80,8 +80,8 @@ def evaluate(folds, picker):
     """
     preds = [picker(f) for f in folds]
     y = np.concatenate([f["y"] for f in folds])
-    pooled = balanced_accuracy_score(y, np.concatenate(preds))
-    return pooled, [balanced_accuracy_score(f["y"], p) for f, p in zip(folds, preds)]
+    pooled = balanced_accuracy(y, np.concatenate(preds))
+    return pooled, [balanced_accuracy(f["y"], p) for f, p in zip(folds, preds)]
 
 
 def oracle_pick(fold, subsets):
@@ -102,7 +102,7 @@ def oracle_pick(fold, subsets):
     pred = np.zeros(len(fold["y"]), dtype=int)
     for s in np.unique(fold["subject"]):
         rows = fold["subject"] == s
-        scores = [balanced_accuracy_score(fold["y"][rows], _predict(fold["probs"], sub)[rows]) for sub in subsets]
+        scores = [balanced_accuracy(fold["y"][rows], _predict(fold["probs"], sub)[rows]) for sub in subsets]
         pred[rows] = _predict(fold["probs"], subsets[int(np.argmax(scores))])[rows]
     return pred
 

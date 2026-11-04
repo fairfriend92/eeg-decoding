@@ -21,10 +21,10 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from sklearn.metrics import balanced_accuracy_score
 
 from config import Config, add_dataset_cli_args, resolve_config
 from data_loader import get_cross_subject_data
+from scoring import balanced_accuracy, cell_balanced_accuracies
 from train import compute_matched_epochs, fit, fit_full, predict_probs
 
 
@@ -86,13 +86,9 @@ def export_patch_transformer(data, cfg: Config, path, n_epochs=None):
     if "X_test" in data:
         device = next(model.parameters()).device
         pred = predict_probs(model, data["X_test"], device, cfg.train.batch_size).argmax(axis=1)
-        cells = sorted(set(zip(data["subject_test"], data["session_test"])))
-        cell_scores = [
-            balanced_accuracy_score(data["y_test"][mask], pred[mask])
-            for mask in ((data["subject_test"] == s) & (data["session_test"] == e) for s, e in cells)
-        ]
+        cell_scores = cell_balanced_accuracies(data["y_test"], pred, data["subject_test"], data["session_test"])
         print(f"[patch_transformer] test participants {sorted(set(int(s) for s in data['subject_test']))}: "
-              f"pooled balanced acc={balanced_accuracy_score(data['y_test'], pred):.3f}, "
+              f"pooled balanced acc={balanced_accuracy(data['y_test'], pred):.3f}, "
               f"cell-averaged={np.mean(cell_scores):.3f} over {len(cell_scores)} cells", flush=True)
     return checkpoint
 

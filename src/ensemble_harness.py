@@ -22,6 +22,7 @@ import numpy as np
 
 from analyze_ensemble import paired_difference
 from config import OUTPUT_DIR
+from scoring import balanced_accuracy
 
 
 def load_member_dumps(dataset, member_names):
@@ -58,11 +59,6 @@ def load_member_dumps(dataset, member_names):
     return shared
 
 
-def _balanced_accuracy(y, pred, n_classes):
-    recalls = [(pred[y == c] == c).mean() for c in range(n_classes) if (y == c).any()]
-    return float(np.mean(recalls))
-
-
 def subset_score(probs, y, criterion):
     """Scores the uniform average of the given member probabilities.
 
@@ -87,7 +83,7 @@ def subset_score(probs, y, criterion):
     if criterion == "acc":
         return float((pred == y).mean())
     if criterion == "bal_acc":
-        return _balanced_accuracy(y, pred, avg.shape[1])
+        return balanced_accuracy(y, pred)
     raise ValueError(f"Unknown criterion '{criterion}'. Choices: nll, acc, bal_acc")
 
 

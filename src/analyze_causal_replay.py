@@ -11,9 +11,9 @@ mean and spread of the per-fold stream means.
 import argparse
 
 import numpy as np
-from sklearn.metrics import balanced_accuracy_score
 
 from config import OUTPUT_DIR
+from scoring import balanced_accuracy, cell_balanced_accuracies
 
 WINDOW_BIN = 10    # windows per bin of the by-position table
 
@@ -88,15 +88,15 @@ def summarize(dump, fold_of_row):
     by_position = []
     for start in range(0, positions.max() + 1, WINDOW_BIN):
         mask = (positions >= start) & (positions < start + WINDOW_BIN)
-        by_position.append((start, balanced_accuracy_score(y[mask], pred[mask])))
+        by_position.append((start, balanced_accuracy(y[mask], pred[mask])))
     fold_means = [
-        float(np.mean([balanced_accuracy_score(y[streams == s], pred[streams == s]) for s in np.unique(streams[fold_of_row == f])]))
+        float(cell_balanced_accuracies(y[fold_of_row == f], pred[fold_of_row == f], dump["subject"][fold_of_row == f], dump["session"][fold_of_row == f]).mean())
         for f in np.unique(fold_of_row)
     ]
     return {
         "fold_means": fold_means,
-        "pooled": balanced_accuracy_score(y, pred),
-        "stream_mean": float(np.mean([balanced_accuracy_score(y[streams == s], pred[streams == s]) for s in np.unique(streams)])),
+        "pooled": balanced_accuracy(y, pred),
+        "stream_mean": float(cell_balanced_accuracies(y, pred, dump["subject"], dump["session"]).mean()),
         "by_position": by_position,
     }
 

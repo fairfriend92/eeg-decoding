@@ -10,9 +10,9 @@ mean replay time per window.
 import argparse
 
 import numpy as np
-from sklearn.metrics import balanced_accuracy_score
 
 from config import OUTPUT_DIR
+from scoring import balanced_accuracy
 
 VARIANT_NAMES = ("none", "abn", "tent")
 
@@ -41,7 +41,7 @@ def participant_scores(dataset, member, suffix, variant, tag, n_folds):
         d = np.load(OUTPUT_DIR / dataset / "cross_subject" / f"predictions_{member}{suffix}_tta_{variant}{tag}_f{k}.npz")
         for subject in np.unique(d["subject"]):
             rows = d["subject"] == subject
-            scores[int(subject)] = balanced_accuracy_score(d["y"][rows], d["probs"][rows].argmax(axis=1))
+            scores[int(subject)] = balanced_accuracy(d["y"][rows], d["probs"][rows].argmax(axis=1))
         seconds.append(float(d["seconds_per_window"]))
     return scores, float(np.mean(seconds))
 
