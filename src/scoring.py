@@ -51,3 +51,21 @@ def cell_balanced_accuracies(y, pred, subject, session, context=None):
     _, cell_of_row = np.unique(np.stack(keys, axis=1), axis=0, return_inverse=True)
     cell_of_row = cell_of_row.reshape(-1)
     return np.array([balanced_accuracy(y[cell_of_row == c], pred[cell_of_row == c]) for c in range(cell_of_row.max() + 1)])
+
+
+def class_recalls(y, pred, n_classes):
+    """Recall of each class over all rows, pooled across participants and sessions.
+
+    Parameters
+    ----------
+    y, pred : ndarray, shape (n_rows,)
+        Integer labels and predicted classes.
+    n_classes : int
+        Number of classes, indexed 0 to n_classes - 1.
+
+    Returns
+    -------
+    ndarray, shape (n_classes,)
+        NaN for a class absent from the labels.
+    """
+    return np.array([(pred[y == c] == c).mean() if (y == c).any() else float("nan") for c in range(n_classes)])
